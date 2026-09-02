@@ -1,0 +1,27 @@
+# Flutter/Dart
+.dart_tool/
+.flutter-plugins
+.flutter-plugins-dependencies
+.packages
+.pub-cache/
+.pub/
+build/
+linux/flutter/ephemeral/
+windows/flutter/ephemeral/
+macos/flutter/ephemeral/
+.ephemeral/
+
+# IDE
+.idea/
+*.iml
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Project specific
+.metadata
+pubspec.lock

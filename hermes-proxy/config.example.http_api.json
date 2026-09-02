@@ -1,0 +1,22 @@
+{
+  "listen": ":8080",
+  "ws_path": "/ws",
+  "auth": {
+    "method": "http_api",
+    "http_api": {
+      "url": "https://auth.example.com/validate",
+      "header": "Authorization",
+      "token_prefix": "Bearer ",
+      "timeout": 5
+    }
+  },
+  "log_level": "info",
+  "servers": [
+    {
+      "id": "local",
+      "name": "Local Hermes Studio",
+      "url": "http://localhost:3000",
+      "enabled": true
+    }
+  ]
+}

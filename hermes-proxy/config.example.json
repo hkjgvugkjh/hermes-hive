@@ -1,0 +1,25 @@
+{
+  "listen": ":8080",
+  "ws_path": "/ws",
+  "auth": {
+    "method": "static_token",
+    "static_token": {
+      "token": "your-secret-token-here"
+    }
+  },
+  "log_level": "info",
+  "servers": [
+    {
+      "id": "local",
+      "name": "Local Hermes Studio",
+      "url": "http://localhost:3000",
+      "enabled": true
+    },
+    {
+      "id": "office",
+      "name": "Office Server",
+      "url": "http://10.0.0.1:3000",
+      "enabled": true
+    }
+  ]
+}
