@@ -119,5 +119,10 @@
   "deleteCombination": "删除组合",
   "deleteCombinationConfirm": "确定要删除 \"{name}\" 吗？",
   "available": "可用",
-  "unavailable": "不可用"
+  "unavailable": "不可用",
+  "autoContinueMode": "自动继续模式",
+  "allSessions": "所有",
+  "recentSessions": "最近",
+  "inProgress": "进行中",
+  "completed": "已完成"
 }

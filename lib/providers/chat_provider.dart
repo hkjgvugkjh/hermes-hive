@@ -6,6 +6,12 @@ import '../providers/debug_logger.dart';
 import '../providers/prompt_provider.dart';
 import '../services/prompt_storage.dart';
 
+/// View mode for the session list
+enum SessionViewMode {
+  all,
+  recent,
+}
+
 /// Chat state provider for managing conversations
 class ChatProvider extends ChangeNotifier {
   final ServerProvider _serverProvider;
@@ -26,6 +32,17 @@ class ChatProvider extends ChangeNotifier {
   String? _selectedModel;
   String? _selectedProvider;
   bool _isLoadingModels = false;
+  
+  // Session view mode
+  SessionViewMode _sessionViewMode = SessionViewMode.all;
+  final Map<String, List<HermesSession>> _serverSessionsCache = {};
+  final Map<String, DateTime> _sessionActivity = {}; // sessionId -> last activity
+  
+  // Auto-continue mode state
+  bool _autoContinueEnabled = false;
+  int _autoContinueDoneCount = 0;
+  final String _autoContinuePrompt = '完成后回复OK，全部完成回复DONE';
+  final String _autoContinueFollowUp = '继续，完成后回复OK，全部完成回复DONE';
 
   ChatProvider(this._serverProvider, this._globalConfigProvider) {
     _serverProvider.addListener(_onServerProviderChange);
@@ -91,6 +108,101 @@ class ChatProvider extends ChangeNotifier {
   String? get selectedModel => _selectedModel;
   String? get selectedProvider => _selectedProvider;
   bool get isLoadingModels => _isLoadingModels;
+  SessionViewMode get sessionViewMode => _sessionViewMode;
+  
+  // Auto-continue getters
+  bool get autoContinueEnabled => _autoContinueEnabled;
+  int get autoContinueDoneCount => _autoContinueDoneCount;
+  String get autoContinuePrompt => _autoContinuePrompt;
+  String get autoContinueFollowUp => _autoContinueFollowUp;
+
+  /// Get sessions to display based on current view mode
+  List<HermesSession> get displaySessions {
+    final server = _serverProvider.activeServer;
+    if (server == null) return [];
+    
+    if (_sessionViewMode == SessionViewMode.recent) {
+      return getRecentSessions(server.id);
+    }
+    return _sessions;
+  }
+
+  /// Get recent sessions across all servers
+  List<HermesSession> getRecentSessions([String? forServerId]) {
+    final allSessions = <HermesSession>[];
+    
+    for (final entry in _serverSessionsCache.entries) {
+      final serverId = entry.key;
+      final sessions = entry.value;
+      final server = _serverProvider.servers.firstWhere(
+        (s) => s.id == serverId,
+        orElse: () => ServerConfig(id: '', name: 'Unknown', url: ''),
+      );
+      
+      for (final session in sessions) {
+        // Only include sessions with recent activity (last 24 hours or manually tracked)
+        final lastActivity = _sessionActivity[session.id] ?? session.updatedAt;
+        if (lastActivity != null) {
+          final age = DateTime.now().difference(lastActivity);
+          if (age.inHours < 24) {
+            allSessions.add(session.copyWith(
+              serverId: serverId,
+              serverName: server.name,
+              status: _getSessionStatus(session),
+            ));
+          }
+        }
+      }
+    }
+    
+    // Sort by most recent first
+    allSessions.sort((a, b) {
+      final aTime = _sessionActivity[a.id] ?? a.updatedAt ?? DateTime(1970);
+      final bTime = _sessionActivity[b.id] ?? b.updatedAt ?? DateTime(1970);
+      return bTime.compareTo(aTime);
+    });
+    
+    return allSessions;
+  }
+
+  /// Determine session status based on recent messages
+  SessionStatus _getSessionStatus(HermesSession session) {
+    // If we have current messages for this session, check the last message
+    if (_currentSessionId == session.id && _currentMessages.isNotEmpty) {
+      final lastMsg = _currentMessages.last;
+      if (lastMsg.role == 'assistant') {
+        if (lastMsg.content.contains('DONE')) {
+          return SessionStatus.completed;
+        }
+        return SessionStatus.inProgress;
+      }
+    }
+    
+    // Default: check if session has recent activity
+    final lastActivity = _sessionActivity[session.id] ?? session.updatedAt;
+    if (lastActivity != null) {
+      final age = DateTime.now().difference(lastActivity);
+      if (age.inMinutes < 5) {
+        return SessionStatus.inProgress;
+      }
+    }
+    
+    return SessionStatus.unknown;
+  }
+
+  /// Toggle session view mode
+  void toggleSessionViewMode() {
+    _sessionViewMode = _sessionViewMode == SessionViewMode.all 
+        ? SessionViewMode.recent 
+        : SessionViewMode.all;
+    notifyListeners();
+  }
+
+  /// Set session view mode
+  void setSessionViewMode(SessionViewMode mode) {
+    _sessionViewMode = mode;
+    notifyListeners();
+  }
 
   /// Load sessions from the active server
   Future<void> loadSessions() async {
@@ -124,6 +236,7 @@ class ChatProvider extends ChangeNotifier {
                 .map((s) => HermesSession.fromJson(s as Map<String, dynamic>))
                 .toList();
             _sessions = sessions;
+            _serverSessionsCache[server.id] = sessions;
             _isLoggedIn = true;
             DebugLogger.instance.success('Loaded ${sessions.length} sessions via proxy');
           } else if (result['status_code'] == 401) {
@@ -149,6 +262,7 @@ class ChatProvider extends ChangeNotifier {
         DebugLogger.instance.success('Login successful');
         
         _sessions = await client.listSessions();
+        _serverSessionsCache[server.id] = _sessions;
         DebugLogger.instance.success('Loaded ${_sessions.length} sessions');
       }
     } catch (e) {
@@ -243,7 +357,7 @@ class ChatProvider extends ChangeNotifier {
     notifyListeners();
   }
 
-  /// Send a message
+  /// Send a message with optional model/provider and auto-continue logic
   Future<void> sendMessage(String input, {String? model, String? provider}) async {
     final server = _serverProvider.activeServer;
     if (server == null || input.trim().isEmpty) return;
@@ -251,6 +365,12 @@ class ChatProvider extends ChangeNotifier {
     _isSending = true;
     _error = null;
     notifyListeners();
+
+    // Append auto-continue suffix if enabled
+    String finalInput = input.trim();
+    if (_autoContinueEnabled) {
+      finalInput = '$finalInput\n$_autoContinuePrompt';
+    }
 
     // Add user message immediately
     final userMessage = ChatMessage(role: 'user', content: input.trim());
@@ -267,7 +387,7 @@ class ChatProvider extends ChangeNotifier {
         if (proxyClient != null) {
           await proxyClient.connect();
           final body = {
-            'input': input.trim(),
+            'input': finalInput,
             'profile': server.profile,
             if (_currentSessionId != null) 'session_id': _currentSessionId,
             if (model != null) 'model': model,
@@ -291,7 +411,7 @@ class ChatProvider extends ChangeNotifier {
       } else {
         final client = _serverProvider.getClient(server);
         final result = await client.runChat(
-          input: input.trim(),
+          input: finalInput,
           sessionId: _currentSessionId,
           model: model,
           provider: provider,
@@ -304,12 +424,23 @@ class ChatProvider extends ChangeNotifier {
         role: 'assistant',
         content: content,
       ));
+      
+      // Track session activity
+      if (_currentSessionId != null) {
+        _sessionActivity[_currentSessionId!] = DateTime.now();
+      }
+      
       // Update session ID if this was a new session
       if (_currentSessionId == null && newSessionId != null) {
         _currentSessionId = newSessionId;
       }
       // Reload sessions list to show new session
       await loadSessions();
+
+      // Auto-continue logic: check response for OK/DONE
+      if (_autoContinueEnabled) {
+        _handleAutoContinueResponse(content);
+      }
     } catch (e) {
       _currentMessages.add(ChatMessage(
         role: 'assistant',
@@ -321,6 +452,40 @@ class ChatProvider extends ChangeNotifier {
 
     _isSending = false;
     notifyListeners();
+  }
+
+  /// Handle auto-continue response detection
+  void _handleAutoContinueResponse(String content) {
+    final trimmed = content.trim();
+    
+    // Check for DONE first (takes priority)
+    if (trimmed.contains('DONE')) {
+      _autoContinueDoneCount++;
+      DebugLogger.instance.info('Auto-continue', 'DONE detected ($_autoContinueDoneCount/3)');
+      
+      if (_autoContinueDoneCount >= 3) {
+        // 3 consecutive DONEs - exit auto-continue mode
+        DebugLogger.instance.success('Auto-continue: 3 DONEs received, exiting mode');
+        _autoContinueEnabled = false;
+        _autoContinueDoneCount = 0;
+        return;
+      }
+    } else if (trimmed.contains('OK')) {
+      // OK resets DONE count (intermediate response)
+      _autoContinueDoneCount = 0;
+      DebugLogger.instance.info('Auto-continue', 'OK detected, resetting DONE count');
+    }
+    
+    // If auto-continue still enabled and we got OK (or non-DONE response), send follow-up
+    if (_autoContinueEnabled && !trimmed.contains('DONE')) {
+      DebugLogger.instance.info('Auto-continue', 'Sending follow-up message');
+      // Use a small delay to avoid overwhelming the server
+      Future.delayed(const Duration(milliseconds: 500), () {
+        if (_autoContinueEnabled) {
+          sendMessage(_autoContinueFollowUp);
+        }
+      });
+    }
   }
 
   /// Start a new chat session
@@ -419,6 +584,20 @@ class ChatProvider extends ChangeNotifier {
 
   void clearError() {
     _error = null;
+    notifyListeners();
+  }
+
+  /// Toggle auto-continue mode
+  void toggleAutoContinue() {
+    _autoContinueEnabled = !_autoContinueEnabled;
+    _autoContinueDoneCount = 0;
+    notifyListeners();
+  }
+
+  /// Disable auto-continue mode
+  void disableAutoContinue() {
+    _autoContinueEnabled = false;
+    _autoContinueDoneCount = 0;
     notifyListeners();
   }
 }

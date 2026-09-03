@@ -236,6 +236,9 @@ class HermesSession {
   final String? provider;
   final DateTime? updatedAt;
   final int? messageCount;
+  final String? serverId;
+  final String? serverName;
+  final SessionStatus status;
 
   HermesSession({
     required this.id,
@@ -245,6 +248,9 @@ class HermesSession {
     this.provider,
     this.updatedAt,
     this.messageCount,
+    this.serverId,
+    this.serverName,
+    this.status = SessionStatus.unknown,
   });
 
   factory HermesSession.fromJson(Map<String, dynamic> json) => HermesSession(
@@ -261,6 +267,30 @@ class HermesSession {
                 : null,
         messageCount: json['message_count'] as int?,
       );
+
+  HermesSession copyWith({
+    String? serverId,
+    String? serverName,
+    SessionStatus? status,
+  }) =>
+      HermesSession(
+        id: id,
+        title: title,
+        profile: profile,
+        model: model,
+        provider: provider,
+        updatedAt: updatedAt,
+        messageCount: messageCount,
+        serverId: serverId ?? this.serverId,
+        serverName: serverName ?? this.serverName,
+        status: status ?? this.status,
+      );
+}
+
+enum SessionStatus {
+  inProgress,
+  completed,
+  unknown,
 }
 
 /// Health status response

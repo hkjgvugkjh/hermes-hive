@@ -289,6 +289,31 @@ class _ChatScreenState extends State<ChatScreen> {
                   AppLocalizations.of(context).sessionsList,
                   style: Theme.of(context).textTheme.titleSmall?.copyWith(fontWeight: FontWeight.bold),
                 ),
+                const SizedBox(width: 8),
+                // View mode toggle
+                SegmentedButton<SessionViewMode>(
+                  segments: [
+                    ButtonSegment(
+                      value: SessionViewMode.all,
+                      label: Text(AppLocalizations.of(context).allSessions, style: const TextStyle(fontSize: 11)),
+                      icon: const Icon(Icons.list, size: 14),
+                    ),
+                    ButtonSegment(
+                      value: SessionViewMode.recent,
+                      label: Text(AppLocalizations.of(context).recentSessions, style: const TextStyle(fontSize: 11)),
+                      icon: const Icon(Icons.schedule, size: 14),
+                    ),
+                  ],
+                  selected: {provider.sessionViewMode},
+                  onSelectionChanged: (selected) {
+                    provider.setSessionViewMode(selected.first);
+                  },
+                  style: ButtonStyle(
+                    visualDensity: VisualDensity.compact,
+                    tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                  ),
+                  showSelectedIcon: false,
+                ),
                 const Spacer(),
                 IconButton(
                   icon: const Icon(Icons.add, size: 18),
@@ -303,7 +328,7 @@ class _ChatScreenState extends State<ChatScreen> {
           Expanded(
             child: provider.isLoading
                 ? const Center(child: CircularProgressIndicator(strokeWidth: 2))
-                : provider.sessions.isEmpty
+                : provider.displaySessions.isEmpty
                     ? Center(
                         child: Padding(
                           padding: const EdgeInsets.all(16),
@@ -315,48 +340,150 @@ class _ChatScreenState extends State<ChatScreen> {
                         ),
                       )
                     : ListView.builder(
-                        itemCount: provider.sessions.length,
+                        itemCount: provider.displaySessions.length,
                         itemBuilder: (context, index) {
-                          final session = provider.sessions[index];
+                          final session = provider.displaySessions[index];
                           final isActive = provider.currentSessionId == session.id;
-                          return ListTile(
-                            dense: true,
-                            selected: isActive,
-                            title: Text(
-                              session.title,
-                              style: TextStyle(
-                                fontSize: 13,
-                                fontWeight: isActive ? FontWeight.bold : FontWeight.normal,
-                              ),
-                              overflow: TextOverflow.ellipsis,
-                            ),
-                            subtitle: session.updatedAt != null
-                                ? Text(
-                                    DateFormat('MM/dd HH:mm').format(session.updatedAt!),
-                                    style: const TextStyle(fontSize: 11),
-                                  )
-                                : null,
-                            onTap: () => provider.selectSession(session.id),
-                            trailing: PopupMenuButton<String>(
-                              icon: const Icon(Icons.more_vert, size: 16),
-                              padding: EdgeInsets.zero,
-                              onSelected: (value) {
-                                if (value == 'delete') {
-                                  provider.deleteSession(session.id);
-                                }
-                              },
-                              itemBuilder: (context) => [
-                                PopupMenuItem(
-                                  value: 'delete',
-                                  child: Text(AppLocalizations.of(context).delete, style: const TextStyle(color: Colors.red)),
-                                ),
-                              ],
-                            ),
-                          );
+                          return _buildSessionTile(context, provider, session, isActive);
                         },
                       ),
           ),
         ],
+      ),
+    );
+  }
+
+  Widget _buildSessionTile(BuildContext context, ChatProvider provider, HermesSession session, bool isActive) {
+    final l10n = AppLocalizations.of(context);
+    final isRecent = provider.sessionViewMode == SessionViewMode.recent;
+    final needsServerSwitch = isRecent && session.serverId != null && 
+        context.read<ServerProvider>().activeServer?.id != session.serverId;
+    
+    return ListTile(
+      dense: true,
+      selected: isActive,
+      leading: _buildStatusIndicator(session),
+      title: Text(
+        session.title,
+        style: TextStyle(
+          fontSize: 13,
+          fontWeight: isActive ? FontWeight.bold : FontWeight.normal,
+        ),
+        overflow: TextOverflow.ellipsis,
+      ),
+      subtitle: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          if (isRecent && session.serverName != null)
+            Row(
+              children: [
+                Icon(Icons.dns, size: 10, color: Theme.of(context).colorScheme.primary),
+                const SizedBox(width: 2),
+                Text(
+                  session.serverName!,
+                  style: TextStyle(
+                    fontSize: 10,
+                    color: needsServerSwitch 
+                        ? Colors.orange[700]
+                        : Theme.of(context).colorScheme.primary,
+                    fontWeight: FontWeight.w500,
+                  ),
+                ),
+              ],
+            ),
+          Row(
+            children: [
+              if (session.updatedAt != null)
+                Text(
+                  DateFormat('MM/dd HH:mm').format(session.updatedAt!),
+                  style: const TextStyle(fontSize: 11),
+                ),
+              const SizedBox(width: 8),
+              _buildStatusLabel(session.status, l10n),
+            ],
+          ),
+        ],
+      ),
+      onTap: () async {
+        // If session belongs to a different server, switch server first
+        if (needsServerSwitch && session.serverId != null) {
+          final serverProvider = context.read<ServerProvider>();
+          final targetServer = serverProvider.servers.firstWhere(
+            (s) => s.id == session.serverId,
+            orElse: () => serverProvider.activeServer!,
+          );
+          await serverProvider.setActiveServer(targetServer);
+          // Wait for session load
+          await Future.delayed(const Duration(milliseconds: 100));
+        }
+        provider.selectSession(session.id);
+      },
+      trailing: PopupMenuButton<String>(
+        icon: const Icon(Icons.more_vert, size: 16),
+        padding: EdgeInsets.zero,
+        onSelected: (value) {
+          if (value == 'delete') {
+            provider.deleteSession(session.id);
+          }
+        },
+        itemBuilder: (context) => [
+          PopupMenuItem(
+            value: 'delete',
+            child: Text(l10n.delete, style: const TextStyle(color: Colors.red)),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildStatusIndicator(HermesSession session) {
+    IconData iconData;
+    Color color;
+    
+    switch (session.status) {
+      case SessionStatus.inProgress:
+        iconData = Icons.radio_button_checked;
+        color = Colors.orange;
+        break;
+      case SessionStatus.completed:
+        iconData = Icons.check_circle;
+        color = Colors.green;
+        break;
+      case SessionStatus.unknown:
+        iconData = Icons.radio_button_unchecked;
+        color = Colors.grey;
+        break;
+    }
+    
+    return Icon(iconData, size: 16, color: color);
+  }
+
+  Widget _buildStatusLabel(SessionStatus status, AppLocalizations l10n) {
+    String label;
+    Color color;
+    
+    switch (status) {
+      case SessionStatus.inProgress:
+        label = l10n.inProgress;
+        color = Colors.orange;
+        break;
+      case SessionStatus.completed:
+        label = l10n.completed;
+        color = Colors.green;
+        break;
+      case SessionStatus.unknown:
+        return const SizedBox.shrink();
+    }
+    
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.1),
+        borderRadius: BorderRadius.circular(4),
+      ),
+      child: Text(
+        label,
+        style: TextStyle(fontSize: 9, color: color, fontWeight: FontWeight.w500),
       ),
     );
   }
@@ -394,6 +521,10 @@ class _ChatScreenState extends State<ChatScreen> {
                   ],
                 ),
               ),
+              // Auto-continue toggle
+              _buildAutoContinueToggle(context, provider),
+              if (provider.autoContinueEnabled)
+                _buildAutoContinueStatus(context, provider),
               if (provider.currentSessionId != null)
                 Chip(
                   label: Text(
@@ -742,6 +873,47 @@ class _ChatScreenState extends State<ChatScreen> {
     _focusNode.requestFocus();
   }
 
+  Widget _buildAutoContinueToggle(BuildContext context, ChatProvider provider) {
+    final l10n = AppLocalizations.of(context);
+    return Tooltip(
+      message: l10n.autoContinueMode,
+      child: IconButton(
+        icon: Icon(
+          provider.autoContinueEnabled ? Icons.auto_mode : Icons.auto_mode_outlined,
+          color: provider.autoContinueEnabled ? Colors.orange : null,
+        ),
+        onPressed: () {
+          provider.toggleAutoContinue();
+        },
+      ),
+    );
+  }
+
+  Widget _buildAutoContinueStatus(BuildContext context, ChatProvider provider) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+      decoration: BoxDecoration(
+        color: Colors.orange.withValues(alpha: 0.1),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: Colors.orange.withValues(alpha: 0.3)),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(Icons.autorenew, size: 14, color: Colors.orange[700]),
+          const SizedBox(width: 4),
+          Text(
+            '${provider.autoContinueDoneCount}/3',
+            style: TextStyle(
+              fontSize: 11,
+              color: Colors.orange[700],
+              fontWeight: FontWeight.bold,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
 }
 
 class _ScrollUpIntent extends Intent {

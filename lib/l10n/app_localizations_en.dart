@@ -398,4 +398,19 @@ class AppLocalizationsEn extends AppLocalizations {
 
   @override
   String get unavailable => 'Unavailable';
+
+  @override
+  String get autoContinueMode => 'Auto-Continue Mode';
+
+  @override
+  String get allSessions => 'All';
+
+  @override
+  String get recentSessions => 'Recent';
+
+  @override
+  String get inProgress => 'In Progress';
+
+  @override
+  String get completed => 'Completed';
 }

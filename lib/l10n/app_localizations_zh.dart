@@ -390,4 +390,19 @@ class AppLocalizationsZh extends AppLocalizations {
 
   @override
   String get unavailable => '不可用';
+
+  @override
+  String get autoContinueMode => '自动继续模式';
+
+  @override
+  String get allSessions => '所有';
+
+  @override
+  String get recentSessions => '最近';
+
+  @override
+  String get inProgress => '进行中';
+
+  @override
+  String get completed => '已完成';
 }

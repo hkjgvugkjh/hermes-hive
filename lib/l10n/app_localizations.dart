@@ -817,6 +817,36 @@ abstract class AppLocalizations {
   /// In zh, this message translates to:
   /// **'不可用'**
   String get unavailable;
+
+  /// No description provided for @autoContinueMode.
+  ///
+  /// In zh, this message translates to:
+  /// **'自动继续模式'**
+  String get autoContinueMode;
+
+  /// No description provided for @allSessions.
+  ///
+  /// In zh, this message translates to:
+  /// **'所有'**
+  String get allSessions;
+
+  /// No description provided for @recentSessions.
+  ///
+  /// In zh, this message translates to:
+  /// **'最近'**
+  String get recentSessions;
+
+  /// No description provided for @inProgress.
+  ///
+  /// In zh, this message translates to:
+  /// **'进行中'**
+  String get inProgress;
+
+  /// No description provided for @completed.
+  ///
+  /// In zh, this message translates to:
+  /// **'已完成'**
+  String get completed;
 }
 
 class _AppLocalizationsDelegate

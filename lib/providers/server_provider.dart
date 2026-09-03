@@ -90,7 +90,11 @@ class ServerProvider extends ChangeNotifier {
     notifyListeners();
   }
 
-  /// Get or create API client for a server (direct connection)
+  /// Get online servers
+  List<ServerConfig> get onlineServers =>
+      _servers.where((s) => s.isOnline).toList();
+
+  /// Get online servers
   HermesApiClient getClient(ServerConfig server) {
     return _clients.putIfAbsent(server.id, () => HermesApiClient(server));
   }

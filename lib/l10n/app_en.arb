@@ -119,5 +119,10 @@
   "deleteCombination": "Delete Combination",
   "deleteCombinationConfirm": "Are you sure you want to delete \"{name}\"?",
   "available": "Available",
-  "unavailable": "Unavailable"
+  "unavailable": "Unavailable",
+  "autoContinueMode": "Auto-Continue Mode",
+  "allSessions": "All",
+  "recentSessions": "Recent",
+  "inProgress": "In Progress",
+  "completed": "Completed"
 }

@@ -9,6 +9,9 @@ import 'server_config_screen.dart';
 import 'chat_screen.dart';
 import 'global_config_screen.dart';
 import 'egg_page.dart';
+import 'pipeline_screen.dart';
+import 'version_control_screen.dart';
+import 'dashboard_screen.dart';
 import '../widgets/server_list_sidebar.dart';
 
 /// Main application screen with server list and chat area
@@ -36,6 +39,36 @@ class _HomeScreenState extends State<HomeScreen> {
       appBar: AppBar(
         title: Text(AppLocalizations.of(context).appTitle),
         actions: [
+          IconButton(
+            icon: const Icon(Icons.account_tree),
+            tooltip: '协同工作',
+            onPressed: () {
+              Navigator.push(
+                context,
+                MaterialPageRoute(builder: (_) => const PipelineScreen()),
+              );
+            },
+          ),
+          IconButton(
+            icon: const Icon(Icons.dashboard),
+            tooltip: '仪表板',
+            onPressed: () {
+              Navigator.push(
+                context,
+                MaterialPageRoute(builder: (_) => const DashboardScreen()),
+              );
+            },
+          ),
+          IconButton(
+            icon: const Icon(Icons.source),
+            tooltip: '版本控制',
+            onPressed: () {
+              Navigator.push(
+                context,
+                MaterialPageRoute(builder: (_) => const VersionControlScreen()),
+              );
+            },
+          ),
           IconButton(
             icon: const Icon(Icons.egg),
             tooltip: AppLocalizations.of(context).eggOfToday,
