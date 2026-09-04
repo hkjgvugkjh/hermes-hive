@@ -26,8 +26,11 @@ class _ChatScreenState extends State<ChatScreen> {
   final ScrollController _scrollController = ScrollController();
   final TextEditingController _messageController = TextEditingController();
   final FocusNode _focusNode = FocusNode();
-  int _visibleMessageCount = 10;
+  static const int _initialMessageCount = 20;
+  static const int _loadBatchSize = 30;
+  int _visibleMessageCount = _initialMessageCount;
   bool _isLoadingMore = false;
+  bool _hasMoreMessages = true;
 
   @override
   void initState() {
@@ -45,25 +48,41 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   void _onScroll() {
-    if (_scrollController.position.pixels < 50 && !_isLoadingMore) {
+    if (_scrollController.position.pixels < 80 && !_isLoadingMore && _hasMoreMessages) {
       _loadMoreMessages();
     }
   }
 
   void _loadMoreMessages() {
     final provider = context.read<ChatProvider>();
-    if (provider.currentMessages.length > _visibleMessageCount) {
+    final totalMessages = provider.currentMessages.length;
+    
+    if (totalMessages > _visibleMessageCount) {
       setState(() {
         _isLoadingMore = true;
-        _visibleMessageCount = (_visibleMessageCount + 20).clamp(0, provider.currentMessages.length);
+        _visibleMessageCount = (_visibleMessageCount + _loadBatchSize).clamp(0, totalMessages);
+        if (_visibleMessageCount >= totalMessages) {
+          _hasMoreMessages = false;
+        }
       });
+      
       WidgetsBinding.instance.addPostFrameCallback((_) {
         if (_scrollController.hasClients) {
-          _scrollController.jumpTo(50);
+          _scrollController.jumpTo(60);
         }
         setState(() => _isLoadingMore = false);
       });
+    } else {
+      setState(() => _hasMoreMessages = false);
     }
+  }
+
+  void _resetPagination() {
+    setState(() {
+      _visibleMessageCount = _initialMessageCount;
+      _hasMoreMessages = true;
+      _isLoadingMore = false;
+    });
   }
 
   @override
@@ -317,7 +336,10 @@ class _ChatScreenState extends State<ChatScreen> {
                 const Spacer(),
                 IconButton(
                   icon: const Icon(Icons.add, size: 18),
-                  onPressed: () => provider.newSession(),
+                  onPressed: () {
+                    _resetPagination();
+                    provider.newSession();
+                  },
                   tooltip: AppLocalizations.of(context).newSession,
                   visualDensity: VisualDensity.compact,
                 ),
@@ -416,6 +438,7 @@ class _ChatScreenState extends State<ChatScreen> {
           // Wait for session load
           await Future.delayed(const Duration(milliseconds: 100));
         }
+        _resetPagination();
         provider.selectSession(session.id);
       },
       trailing: PopupMenuButton<String>(
@@ -559,8 +582,13 @@ class _ChatScreenState extends State<ChatScreen> {
                       controller: _scrollController,
                       reverse: true,
                       padding: const EdgeInsets.all(16),
-                      itemCount: _visibleMessageCount,
+                      itemCount: _visibleMessageCount + (_hasMoreMessages ? 1 : 0),
                       itemBuilder: (context, index) {
+                        // In reverse ListView, index 0 is at the bottom (newest)
+                        // Loading indicator should be at the top (oldest, highest index)
+                        if (_hasMoreMessages && index == _visibleMessageCount) {
+                          return _buildLoadingIndicator();
+                        }
                         final reversedIndex = _visibleMessageCount - 1 - index;
                         final message = provider.currentMessages[reversedIndex];
                         return _MessageBubble(message: message);
@@ -727,6 +755,31 @@ class _ChatScreenState extends State<ChatScreen> {
             ),
           ),
         ),
+      ),
+    );
+  }
+
+  Widget _buildLoadingIndicator() {
+    return Container(
+      padding: const EdgeInsets.symmetric(vertical: 16),
+      alignment: Alignment.center,
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          SizedBox(
+            width: 16,
+            height: 16,
+            child: CircularProgressIndicator(
+              strokeWidth: 2,
+              color: Theme.of(context).colorScheme.primary,
+            ),
+          ),
+          const SizedBox(width: 8),
+          Text(
+            '加载更多...',
+            style: TextStyle(fontSize: 12, color: Colors.grey[500]),
+          ),
+        ],
       ),
     );
   }
