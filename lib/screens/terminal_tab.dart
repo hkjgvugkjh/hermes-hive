@@ -41,10 +41,11 @@ class _TerminalTabState extends State<TerminalTab> {
 
   void _connectWebSocket() async {
     try {
+      // Get token from API client by logging in
       final client = HermesApiClient(widget.server);
-      await client.ensureLoggedIn();
+      final loggedIn = await client.ensureLoggedIn();
       
-      if (client.token == null || client.token!.isEmpty) {
+      if (!loggedIn || client.token == null || client.token!.isEmpty) {
         _addOutput('错误: 无法获取认证令牌，请先登录');
         return;
       }
@@ -57,8 +58,15 @@ class _TerminalTabState extends State<TerminalTab> {
       DebugLogger.instance.info('Terminal: connecting to $uri');
       
       _channel = WebSocketChannel.connect(uri);
+      await _channel!.ready;
+      
       setState(() => _isConnected = true);
       _addOutput('已连接到 ${widget.server.name}');
+      
+      // Send create message to initialize terminal
+      _channel?.sink.add(jsonEncode({
+        'type': 'create',
+      }));
       
       _channel!.stream.listen(
         (data) {
