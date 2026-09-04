@@ -19,6 +19,7 @@ class _TerminalTabState extends State<TerminalTab> {
   final ScrollController _scrollController = ScrollController();
   WebSocketChannel? _channel;
   bool _isConnected = false;
+  String? _sessionId;
   List<QuickCommand> _quickCommands = [];
 
   @override
@@ -37,13 +38,19 @@ class _TerminalTabState extends State<TerminalTab> {
 
   void _connectWebSocket() {
     try {
+      // Get token from server config
+      final token = widget.server.authToken ?? '';
       final wsUrl = widget.server.baseUrl.replaceFirst('http', 'ws');
-      _channel = WebSocketChannel.connect(Uri.parse('$wsUrl/ws/terminal'));
+      final uri = Uri.parse('$wsUrl/api/hermes/terminal?token=$token');
+      
+      _channel = WebSocketChannel.connect(uri);
       setState(() => _isConnected = true);
       _addOutput('已连接到 ${widget.server.name}');
       
       _channel!.stream.listen(
-        (data) => _addOutput(data.toString()),
+        (data) {
+          _handleMessage(data.toString());
+        },
         onDone: () {
           setState(() => _isConnected = false);
           _addOutput('连接已断开');
@@ -58,14 +65,45 @@ class _TerminalTabState extends State<TerminalTab> {
     }
   }
 
+  void _handleMessage(String data) {
+    try {
+      final msg = jsonDecode(data);
+      final type = msg['type'];
+      
+      switch (type) {
+        case 'created':
+          _sessionId = msg['id'];
+          _addOutput('终端已创建 (PID: ${msg['pid']}, Shell: ${msg['shell']})');
+          break;
+        case 'switched':
+          _addOutput('已切换到会话: ${msg['id']}');
+          break;
+        case 'exited':
+          _addOutput('会话已退出 (退出码: ${msg['exitCode']})');
+          break;
+        case 'error':
+          _addOutput('错误: ${msg['message']}');
+          break;
+        default:
+          _addOutput(data);
+      }
+    } catch (e) {
+      // Raw terminal output
+      _addOutput(data);
+    }
+  }
+
   void _sendCommand(String command) {
     if (command.trim().isEmpty) return;
-    if (!_isConnected) {
+    if (!_isConnected || _sessionId == null) {
       _addOutput('未连接到服务器');
       return;
     }
     _addOutput('\$ $command');
-    _channel?.sink.add(command);
+    _channel?.sink.add(jsonEncode({
+      'type': 'input',
+      'data': command,
+    }));
     _controller.clear();
     _scrollToBottom();
   }
@@ -216,7 +254,7 @@ class _TerminalTabState extends State<TerminalTab> {
                   children: [
                     Icon(_isConnected ? Icons.circle : Icons.circle_outlined, size: 12, color: _isConnected ? Colors.green : Colors.red),
                     const SizedBox(width: 8),
-                    Text(_isConnected ? '已连接' : '未连接', style: const TextStyle(fontSize: 12)),
+                    Text(_isConnected ? '已连接 ($_sessionId)' : '未连接', style: const TextStyle(fontSize: 12)),
                     const Spacer(),
                     if (!_isConnected)
                       TextButton.icon(
@@ -224,12 +262,25 @@ class _TerminalTabState extends State<TerminalTab> {
                         icon: const Icon(Icons.link, size: 16),
                         label: const Text('连接'),
                       )
-                    else
+                    else ...[
+                      TextButton.icon(
+                        onPressed: () {
+                          if (_sessionId != null) {
+                            _channel?.sink.add(jsonEncode({
+                              'type': 'close',
+                              'sessionId': _sessionId,
+                            }));
+                          }
+                        },
+                        icon: const Icon(Icons.close, size: 16),
+                        label: const Text('关闭'),
+                      ),
                       TextButton.icon(
                         onPressed: () => _channel?.sink.close(),
                         icon: const Icon(Icons.link_off, size: 16),
                         label: const Text('断开'),
                       ),
+                    ],
                   ],
                 ),
               ),
