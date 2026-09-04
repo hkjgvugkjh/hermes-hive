@@ -329,6 +329,143 @@ class HermesApiClient {
       return false;
     }
   }
+
+  /// List files in a directory
+  Future<List<FileNode>> listFiles(String path) async {
+    try {
+      final response = await http
+          .get(
+            Uri.parse('${server.baseUrl}/api/studio/files/list?path=${Uri.encodeComponent(path)}'),
+            headers: _headers,
+          )
+          .timeout(const Duration(seconds: 15));
+      if (response.statusCode == 200) {
+        final data = jsonDecode(response.body);
+        final files = (data['files'] as List? ?? data as List? ?? [])
+            .map((f) => FileNode.fromJson(f as Map<String, dynamic>))
+            .toList();
+        return files;
+      }
+      return [];
+    } catch (e) {
+      DebugLogger.instance.error('listFiles failed', e.toString());
+      return [];
+    }
+  }
+
+  /// Read file content
+  Future<String> readFile(String path) async {
+    try {
+      final response = await http
+          .get(
+            Uri.parse('${server.baseUrl}/api/studio/files/read?path=${Uri.encodeComponent(path)}'),
+            headers: _headers,
+          )
+          .timeout(const Duration(seconds: 15));
+      if (response.statusCode == 200) {
+        final data = jsonDecode(response.body);
+        return data['content'] as String? ?? '';
+      }
+      return '';
+    } catch (e) {
+      DebugLogger.instance.error('readFile failed', e.toString());
+      return '';
+    }
+  }
+
+  /// Write file content
+  Future<bool> writeFile(String path, String content) async {
+    try {
+      final response = await http
+          .put(
+            Uri.parse('${server.baseUrl}/api/studio/files/write'),
+            headers: _headers,
+            body: jsonEncode({'path': path, 'content': content}),
+          )
+          .timeout(const Duration(seconds: 15));
+      return response.statusCode == 200;
+    } catch (e) {
+      DebugLogger.instance.error('writeFile failed', e.toString());
+      return false;
+    }
+  }
+
+  /// Create directory
+  Future<bool> createDirectory(String path) async {
+    try {
+      final response = await http
+          .post(
+            Uri.parse('${server.baseUrl}/api/studio/files/mkdir'),
+            headers: _headers,
+            body: jsonEncode({'path': path}),
+          )
+          .timeout(const Duration(seconds: 15));
+      return response.statusCode == 200;
+    } catch (e) {
+      DebugLogger.instance.error('createDirectory failed', e.toString());
+      return false;
+    }
+  }
+
+  /// Delete file or directory
+  Future<bool> deleteFile(String path) async {
+    try {
+      final response = await http
+          .delete(
+            Uri.parse('${server.baseUrl}/api/studio/files/delete?path=${Uri.encodeComponent(path)}'),
+            headers: _headers,
+          )
+          .timeout(const Duration(seconds: 15));
+      return response.statusCode == 200;
+    } catch (e) {
+      DebugLogger.instance.error('deleteFile failed', e.toString());
+      return false;
+    }
+  }
+
+  /// Rename file or directory
+  Future<bool> renameFile(String oldPath, String newPath) async {
+    try {
+      final response = await http
+          .post(
+            Uri.parse('${server.baseUrl}/api/studio/files/rename'),
+            headers: _headers,
+            body: jsonEncode({'old_path': oldPath, 'new_path': newPath}),
+          )
+          .timeout(const Duration(seconds: 15));
+      return response.statusCode == 200;
+    } catch (e) {
+      DebugLogger.instance.error('renameFile failed', e.toString());
+      return false;
+    }
+  }
+}
+
+/// File node for directory listing
+class FileNode {
+  final String name;
+  final String path;
+  final bool isDirectory;
+  final int size;
+  final DateTime modifiedAt;
+
+  FileNode({
+    required this.name,
+    required this.path,
+    required this.isDirectory,
+    this.size = 0,
+    DateTime? modifiedAt,
+  }) : modifiedAt = modifiedAt ?? DateTime.now();
+
+  factory FileNode.fromJson(Map<String, dynamic> json) => FileNode(
+        name: json['name'] as String? ?? '',
+        path: json['path'] as String? ?? '',
+        isDirectory: json['is_directory'] as bool? ?? json['type'] == 'directory',
+        size: json['size'] as int? ?? 0,
+        modifiedAt: json['modified_at'] != null
+            ? DateTime.tryParse(json['modified_at']) ?? DateTime.now()
+            : DateTime.now(),
+      );
 }
 
 /// Result from a chat run
