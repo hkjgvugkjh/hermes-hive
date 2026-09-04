@@ -22,7 +22,7 @@ class ChatScreen extends StatefulWidget {
   State<ChatScreen> createState() => _ChatScreenState();
 }
 
-class _ChatScreenState extends State<ChatScreen> {
+class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
   final ScrollController _scrollController = ScrollController();
   final TextEditingController _messageController = TextEditingController();
   final FocusNode _focusNode = FocusNode();
@@ -35,6 +35,7 @@ class _ChatScreenState extends State<ChatScreen> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _scrollController.addListener(_onScroll);
     DebugLogger.instance.info('ChatScreen initState', 'server=${widget.server.name} url=${widget.server.url}');
     WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -45,6 +46,15 @@ class _ChatScreenState extends State<ChatScreen> {
       chatProvider.loadSessions();
       chatProvider.loadModelGroups();
     });
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      // Refresh sessions when app becomes active
+      final provider = context.read<ChatProvider>();
+      provider.refreshSessions();
+    }
   }
 
   void _onScroll() {
@@ -88,6 +98,7 @@ class _ChatScreenState extends State<ChatScreen> {
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _scrollController.removeListener(_onScroll);
     _messageController.dispose();
     _scrollController.dispose();
@@ -335,6 +346,12 @@ class _ChatScreenState extends State<ChatScreen> {
                   showSelectedIcon: false,
                 ),
                 const Spacer(),
+                IconButton(
+                  icon: const Icon(Icons.refresh, size: 18),
+                  onPressed: () => provider.refreshSessions(),
+                  tooltip: '刷新会话',
+                  visualDensity: VisualDensity.compact,
+                ),
                 IconButton(
                   icon: const Icon(Icons.add, size: 18),
                   onPressed: () {

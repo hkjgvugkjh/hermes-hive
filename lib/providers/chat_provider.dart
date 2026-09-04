@@ -16,7 +16,6 @@ enum SessionViewMode {
 class ChatProvider extends ChangeNotifier {
   final ServerProvider _serverProvider;
   final GlobalConfigProvider _globalConfigProvider;
-  String? _lastLoadedServerId;
   PromptProvider? _promptProvider;
   final Set<String> _savedPromptTexts = {};
   
@@ -84,8 +83,7 @@ class ChatProvider extends ChangeNotifier {
 
   void _onServerProviderChange() {
     final currentId = _serverProvider.activeServer?.id;
-    if (currentId != null && currentId != _lastLoadedServerId) {
-      _lastLoadedServerId = currentId;
+    if (currentId != null) {
       _needsLogin = false;
       _isLoggedIn = false;
       DebugLogger.instance.info(
@@ -204,7 +202,7 @@ class ChatProvider extends ChangeNotifier {
     notifyListeners();
   }
 
-  /// Load sessions from the active server
+  /// Load sessions from the active server (always fetch from remote)
   Future<void> loadSessions() async {
     final server = _serverProvider.activeServer;
     if (server == null) {
@@ -271,6 +269,46 @@ class ChatProvider extends ChangeNotifier {
     }
 
     _isLoading = false;
+    notifyListeners();
+  }
+
+  /// Refresh sessions from remote (can be called manually)
+  Future<void> refreshSessions() async {
+    final server = _serverProvider.activeServer;
+    if (server == null) return;
+    
+    // Don't show loading indicator for background refresh
+    try {
+      if (_globalConfigProvider.isProxyMode) {
+        final proxyClient = _serverProvider.getProxyClient(server);
+        if (proxyClient != null) {
+          await proxyClient.connect();
+          final result = await proxyClient.sendRequest(
+            serverId: _globalConfigProvider.config.proxyUrl,
+            method: 'GET',
+            path: '/api/studio/sessions?limit=50',
+          );
+          if (result['status_code'] == 200) {
+            final body = result['body'] as Map<String, dynamic>;
+            final sessions = (body['sessions'] as List? ?? body as List? ?? [])
+                .map((s) => HermesSession.fromJson(s as Map<String, dynamic>))
+                .toList();
+            _sessions = sessions;
+            _serverSessionsCache[server.id] = sessions;
+            DebugLogger.instance.success('Refreshed ${sessions.length} sessions via proxy');
+          }
+        }
+      } else {
+        final client = _serverProvider.getClient(server);
+        if (_isLoggedIn) {
+          _sessions = await client.listSessions();
+          _serverSessionsCache[server.id] = _sessions;
+          DebugLogger.instance.success('Refreshed ${_sessions.length} sessions');
+        }
+      }
+    } catch (e) {
+      DebugLogger.instance.error('refreshSessions failed', e.toString());
+    }
     notifyListeners();
   }
 
