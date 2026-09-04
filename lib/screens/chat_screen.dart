@@ -48,7 +48,8 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   void _onScroll() {
-    if (_scrollController.position.pixels < 80 && !_isLoadingMore && _hasMoreMessages) {
+    if (_scrollController.position.pixels > _scrollController.position.maxScrollExtent - 80 && 
+        !_isLoadingMore && _hasMoreMessages) {
       _loadMoreMessages();
     }
   }
