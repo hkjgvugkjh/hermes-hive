@@ -4,6 +4,8 @@ import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 import '../models/models.dart';
+import '../services/hermes_api_client.dart';
+import '../providers/debug_logger.dart';
 
 class TerminalTab extends StatefulWidget {
   final ServerConfig server;
@@ -37,12 +39,23 @@ class _TerminalTabState extends State<TerminalTab> {
     super.dispose();
   }
 
-  void _connectWebSocket() {
+  void _connectWebSocket() async {
     try {
-      // Get token from server config
-      final token = widget.server.authToken ?? '';
-      final wsUrl = widget.server.baseUrl.replaceFirst('http', 'ws');
-      final uri = Uri.parse('$wsUrl/api/hermes/terminal?token=$token');
+      // Get token from API client
+      final client = HermesApiClient(widget.server);
+      await client.ensureLoggedIn();
+      
+      if (client.token == null || client.token!.isEmpty) {
+        _addOutput('错误: 无法获取认证令牌，请先登录');
+        return;
+      }
+      
+      final token = client.token!;
+      final wsScheme = widget.server.baseUrl.startsWith('https') ? 'wss' : 'ws';
+      final host = widget.server.baseUrl.replaceFirst(RegExp(r'^https?://'), '');
+      final uri = Uri.parse('$wsScheme://$host/api/hermes/terminal?token=$token');
+      
+      DebugLogger.instance.info('Terminal: connecting to $uri');
       
       _channel = WebSocketChannel.connect(uri);
       setState(() => _isConnected = true);
@@ -59,10 +72,12 @@ class _TerminalTabState extends State<TerminalTab> {
         onError: (e) {
           setState(() => _isConnected = false);
           _addOutput('连接错误: $e');
+          DebugLogger.instance.error('Terminal WebSocket error', e.toString());
         },
       );
     } catch (e) {
       _addOutput('连接失败: $e');
+      DebugLogger.instance.error('Terminal connection failed', e.toString());
     }
   }
 
