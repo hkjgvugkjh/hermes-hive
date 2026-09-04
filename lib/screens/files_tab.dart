@@ -19,8 +19,6 @@ class _FilesTabState extends State<FilesTab> {
   String _fileContent = '';
   bool _isDirty = false;
   final TextEditingController _editorController = TextEditingController();
-  final Map<String, bool> _expandedDirs = {};
-  final Map<String, List<FileNode>> _dirCache = {};
 
   @override
   void initState() {

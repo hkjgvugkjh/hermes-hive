@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
 import '../models/models.dart';
@@ -293,12 +294,41 @@ class _TerminalTabState extends State<TerminalTab> {
                     padding: const EdgeInsets.all(8),
                     itemCount: _history.length,
                     itemBuilder: (context, index) {
-                      return Text(
+                      return SelectableText(
                         _history[index],
                         style: const TextStyle(fontFamily: 'monospace', fontSize: 13, color: Colors.greenAccent),
                       );
                     },
                   ),
+                ),
+              ),
+              // Terminal toolbar with copy button
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                decoration: BoxDecoration(border: Border(top: BorderSide(color: Theme.of(context).dividerColor))),
+                child: Row(
+                  children: [
+                    TextButton.icon(
+                      onPressed: _history.isEmpty ? null : () async {
+                        final text = _history.join('\n');
+                        await Clipboard.setData(ClipboardData(text: text));
+                        if (mounted) {
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            const SnackBar(content: Text('已复制到剪贴板'), duration: Duration(seconds: 1)),
+                          );
+                        }
+                      },
+                      icon: const Icon(Icons.copy, size: 16),
+                      label: const Text('复制全部'),
+                    ),
+                    TextButton.icon(
+                      onPressed: _history.isEmpty ? null : () {
+                        setState(() => _history.clear());
+                      },
+                      icon: const Icon(Icons.clear, size: 16),
+                      label: const Text('清空'),
+                    ),
+                  ],
                 ),
               ),
               // Command input
