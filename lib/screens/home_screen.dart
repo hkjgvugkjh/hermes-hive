@@ -44,7 +44,10 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
     
     WidgetsBinding.instance.addPostFrameCallback((_) {
       context.read<GlobalConfigProvider>().load();
-      context.read<ServerProvider>().load();
+      context.read<ServerProvider>().load().then((_) {
+        // Auto-refresh server health after loading
+        context.read<ServerProvider>().checkAllServers();
+      });
     });
   }
 
