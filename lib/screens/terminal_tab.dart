@@ -18,6 +18,7 @@ class TerminalTab extends StatefulWidget {
 
 class _TerminalTabState extends State<TerminalTab> {
   final List<String> _history = [];
+  final List<String> _pendingCommands = [];
   final TextEditingController _controller = TextEditingController();
   final ScrollController _scrollController = ScrollController();
   WebSocketChannel? _channel;
@@ -41,7 +42,6 @@ class _TerminalTabState extends State<TerminalTab> {
 
   void _connectWebSocket() async {
     try {
-      // Get token from API client by logging in
       final client = HermesApiClient(widget.server);
       final loggedIn = await client.ensureLoggedIn();
       
@@ -63,11 +63,6 @@ class _TerminalTabState extends State<TerminalTab> {
       setState(() => _isConnected = true);
       _addOutput('已连接到 ${widget.server.name}');
       
-      // Send create message to initialize terminal
-      _channel?.sink.add(jsonEncode({
-        'type': 'create',
-      }));
-      
       _channel!.stream.listen(
         (data) {
           _handleMessage(data.toString());
@@ -82,6 +77,10 @@ class _TerminalTabState extends State<TerminalTab> {
           DebugLogger.instance.error('Terminal WebSocket error', e.toString());
         },
       );
+      
+      _channel?.sink.add(jsonEncode({
+        'type': 'create',
+      }));
     } catch (e) {
       _addOutput('连接失败: $e');
       DebugLogger.instance.error('Terminal connection failed', e.toString());
@@ -89,14 +88,16 @@ class _TerminalTabState extends State<TerminalTab> {
   }
 
   void _handleMessage(String data) {
+    DebugLogger.instance.info('Terminal received: $data');
     try {
       final msg = jsonDecode(data);
       final type = msg['type'];
       
       switch (type) {
         case 'created':
-          _sessionId = msg['id'];
+          _sessionId = msg['id'] ?? msg['sessionId'];
           _addOutput('终端已创建 (PID: ${msg['pid']}, Shell: ${msg['shell']})');
+          _flushPendingCommands();
           break;
         case 'switched':
           _addOutput('已切换到会话: ${msg['id']}');
@@ -115,16 +116,34 @@ class _TerminalTabState extends State<TerminalTab> {
     }
   }
 
+  void _flushPendingCommands() {
+    if (_pendingCommands.isEmpty) return;
+    for (final cmd in _pendingCommands) {
+      _sendCommandImmediate(cmd);
+    }
+    _pendingCommands.clear();
+  }
+
   void _sendCommand(String command) {
     if (command.trim().isEmpty) return;
-    if (!_isConnected || _sessionId == null) {
+    if (!_isConnected) {
       _addOutput('未连接到服务器');
       return;
     }
+    if (_sessionId == null) {
+      _pendingCommands.add(command);
+      _addOutput('\$ $command (等待连接...)');
+      return;
+    }
+    _sendCommandImmediate(command);
+  }
+
+  void _sendCommandImmediate(String command) {
     _addOutput('\$ $command');
     _channel?.sink.add(jsonEncode({
       'type': 'input',
       'data': command,
+      'sessionId': _sessionId,
     }));
     _controller.clear();
     _scrollToBottom();
@@ -364,6 +383,11 @@ class _TerminalTabState extends State<TerminalTab> {
                         ),
                         onSubmitted: _sendCommand,
                       ),
+                    ),
+                    IconButton(
+                      icon: const Icon(Icons.send, size: 18, color: Colors.greenAccent),
+                      onPressed: () => _sendCommand(_controller.text),
+                      tooltip: '发送',
                     ),
                   ],
                 ),
