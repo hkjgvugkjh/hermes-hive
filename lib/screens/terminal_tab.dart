@@ -41,7 +41,6 @@ class _TerminalTabState extends State<TerminalTab> {
 
   void _connectWebSocket() async {
     try {
-      // Get token from API client
       final client = HermesApiClient(widget.server);
       await client.ensureLoggedIn();
       
@@ -104,7 +103,6 @@ class _TerminalTabState extends State<TerminalTab> {
           _addOutput(data);
       }
     } catch (e) {
-      // Raw terminal output
       _addOutput(data);
     }
   }
@@ -211,7 +209,6 @@ class _TerminalTabState extends State<TerminalTab> {
   Widget build(BuildContext context) {
     return Row(
       children: [
-        // Quick commands panel
         SizedBox(
           width: 200,
           child: Column(
@@ -258,11 +255,9 @@ class _TerminalTabState extends State<TerminalTab> {
           ),
         ),
         const VerticalDivider(width: 1),
-        // Terminal area
         Expanded(
           child: Column(
             children: [
-              // Terminal toolbar
               Container(
                 padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
                 decoration: BoxDecoration(border: Border(bottom: BorderSide(color: Theme.of(context).dividerColor))),
@@ -300,7 +295,6 @@ class _TerminalTabState extends State<TerminalTab> {
                   ],
                 ),
               ),
-              // Terminal output
               Expanded(
                 child: Container(
                   color: Colors.black87,
@@ -309,15 +303,14 @@ class _TerminalTabState extends State<TerminalTab> {
                     padding: const EdgeInsets.all(8),
                     itemCount: _history.length,
                     itemBuilder: (context, index) {
-                      return SelectableText(
-                        _history[index],
-                        style: const TextStyle(fontFamily: 'monospace', fontSize: 13, color: Colors.greenAccent),
+                      return SelectableText.rich(
+                        _parseAnsiText(_history[index]),
+                        style: const TextStyle(fontFamily: 'monospace', fontSize: 13),
                       );
                     },
                   ),
                 ),
               ),
-              // Terminal toolbar with copy button
               Container(
                 padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
                 decoration: BoxDecoration(border: Border(top: BorderSide(color: Theme.of(context).dividerColor))),
@@ -346,7 +339,6 @@ class _TerminalTabState extends State<TerminalTab> {
                   ],
                 ),
               ),
-              // Command input
               Container(
                 padding: const EdgeInsets.all(8),
                 color: Colors.black87,
@@ -373,6 +365,92 @@ class _TerminalTabState extends State<TerminalTab> {
         ),
       ],
     );
+  }
+
+  TextSpan _parseAnsiText(String text) {
+    final spans = <TextSpan>[];
+    final regex = RegExp(r'\x1B\[([0-9;]*)([A-Za-z])');
+    int lastEnd = 0;
+    
+    Color currentColor = Colors.greenAccent;
+    Color? currentBgColor;
+    bool isBold = false;
+    
+    for (final match in regex.allMatches(text)) {
+      if (match.start > lastEnd) {
+        spans.add(TextSpan(
+          text: text.substring(lastEnd, match.start),
+          style: TextStyle(
+            color: currentColor,
+            backgroundColor: currentBgColor,
+            fontWeight: isBold ? FontWeight.bold : FontWeight.normal,
+          ),
+        ));
+      }
+      
+      final params = match.group(1) ?? '';
+      final command = match.group(2) ?? '';
+      
+      if (command == 'm') {
+        final codes = params.isEmpty ? [0] : params.split(';').map((s) => int.tryParse(s) ?? 0).toList();
+        
+        for (final code in codes) {
+          switch (code) {
+            case 0:
+              currentColor = Colors.greenAccent;
+              currentBgColor = null;
+              isBold = false;
+              break;
+            case 1:
+              isBold = true;
+              break;
+            case 30: currentColor = Colors.black; break;
+            case 31: currentColor = Colors.red; break;
+            case 32: currentColor = Colors.green; break;
+            case 33: currentColor = Colors.yellow; break;
+            case 34: currentColor = Colors.blue; break;
+            case 35: currentColor = Colors.purple; break;
+            case 36: currentColor = Colors.cyan; break;
+            case 37: currentColor = Colors.white; break;
+            case 90: currentColor = Colors.grey; break;
+            case 91: currentColor = Colors.redAccent; break;
+            case 92: currentColor = Colors.lightGreen; break;
+            case 93: currentColor = const Color(0xFFFFFF00); break;
+            case 94: currentColor = Colors.lightBlue; break;
+            case 95: currentColor = Colors.pink; break;
+            case 96: currentColor = Colors.lightBlue; break;
+            case 97: currentColor = Colors.white; break;
+            case 40: currentBgColor = Colors.black; break;
+            case 41: currentBgColor = Colors.red; break;
+            case 42: currentBgColor = Colors.green; break;
+            case 43: currentBgColor = Colors.yellow; break;
+            case 44: currentBgColor = Colors.blue; break;
+            case 45: currentBgColor = Colors.purple; break;
+            case 46: currentBgColor = Colors.cyan; break;
+            case 47: currentBgColor = Colors.white; break;
+          }
+        }
+      }
+      
+      lastEnd = match.end;
+    }
+    
+    if (lastEnd < text.length) {
+      spans.add(TextSpan(
+        text: text.substring(lastEnd),
+        style: TextStyle(
+          color: currentColor,
+          backgroundColor: currentBgColor,
+          fontWeight: isBold ? FontWeight.bold : FontWeight.normal,
+        ),
+      ));
+    }
+    
+    if (spans.isEmpty) {
+      return TextSpan(text: text, style: const TextStyle(color: Colors.greenAccent));
+    }
+    
+    return TextSpan(children: spans);
   }
 }
 
