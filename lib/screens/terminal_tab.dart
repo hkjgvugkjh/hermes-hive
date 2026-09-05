@@ -7,6 +7,28 @@ import '../models/models.dart';
 import '../services/hermes_api_client.dart';
 import '../providers/debug_logger.dart';
 
+final _dangerousPatterns = [
+  RegExp(r'rm\s+-[rfRF]+\s'),
+  RegExp(r'sudo\s+'),
+  RegExp(r'format\s+'),
+  RegExp(r'dd\s+if='),
+  RegExp(r'mkfs\.'),
+  RegExp(r':\(\)\s*{\s*:\|:\s*&\s*}\s*;:'),
+  RegExp(r'chmod\s+-R\s+777'),
+  RegExp(r'chown\s+-R'),
+  RegExp(r'find\s+.*-exec\s+rm'),
+  RegExp(r'git\s+push\s+--force'),
+  RegExp(r'git\s+reset\s+--hard'),
+  RegExp(r'git\s+clean\s+-fd'),
+  RegExp(r'docker\s+rm\s+-f'),
+  RegExp(r'npm\s+uninstall\s+-g'),
+  RegExp(r'pip\s+uninstall\s+-y'),
+  RegExp(r'shutdown\s+'),
+  RegExp(r'reboot\s+'),
+  RegExp(r'kill\s+-9'),
+  RegExp(r'pkill\s+-9'),
+];
+
 class TerminalTab extends StatefulWidget {
   final ServerConfig server;
 
@@ -138,7 +160,14 @@ class _TerminalTabState extends State<TerminalTab> {
     _sendCommandImmediate(command);
   }
 
-  void _sendCommandImmediate(String command) {
+  void _sendCommandImmediate(String command) async {
+    if (isDangerousCommand(command)) {
+      final confirmed = await _showDangerousCommandDialog(command);
+      if (!confirmed) {
+        _addOutput('\$ $command (已取消)');
+        return;
+      }
+    }
     _addOutput('\$ $command');
     _channel?.sink.add(jsonEncode({
       'type': 'input',
@@ -147,6 +176,44 @@ class _TerminalTabState extends State<TerminalTab> {
     }));
     _controller.clear();
     _scrollToBottom();
+  }
+
+  Future<bool> _showDangerousCommandDialog(String command) async {
+    return await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Row(
+          children: [
+            Icon(Icons.warning, color: Colors.orange),
+            SizedBox(width: 8),
+            Text('高风险操作'),
+          ],
+        ),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text('即将执行以下命令：'),
+            SizedBox(height: 8),
+            Container(
+              padding: EdgeInsets.all(8),
+              color: Colors.grey[200],
+              child: Text(command, style: TextStyle(fontFamily: 'monospace')),
+            ),
+            SizedBox(height: 8),
+            Text('此操作可能不可逆，是否继续？'),
+          ],
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('取消')),
+          FilledButton(
+            style: FilledButton.styleFrom(backgroundColor: Colors.red),
+            onPressed: () => Navigator.pop(ctx, true), 
+            child: const Text('确认执行'),
+          ),
+        ],
+      ),
+    ) ?? false;
   }
 
   void _addOutput(String text) {
@@ -535,4 +602,8 @@ class QuickCommandStorage {
     final json = commands.map((c) => c.toJson()).toList();
     await prefs.setString(_key, jsonEncode(json));
   }
+}
+
+bool isDangerousCommand(String command) {
+  return _dangerousPatterns.any((p) => p.hasMatch(command));
 }

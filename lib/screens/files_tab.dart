@@ -77,6 +77,21 @@ class _FilesTabState extends State<FilesTab> {
 
   Future<void> _saveFile() async {
     if (_selectedFile == null) return;
+    
+    // Confirm before overwriting
+    final confirm = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('确认保存'),
+        content: Text('确定要保存对 ${_selectedFile!.split('/').last} 的修改吗？'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('取消')),
+          FilledButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('保存')),
+        ],
+      ),
+    );
+    if (confirm != true) return;
+    
     try {
       final client = HermesApiClient(widget.server);
       await client.ensureLoggedIn();
