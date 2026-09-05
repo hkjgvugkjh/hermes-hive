@@ -13,7 +13,6 @@ final _dangerousPatterns = [
   RegExp(r'format\s+'),
   RegExp(r'dd\s+if='),
   RegExp(r'mkfs\.'),
-  RegExp(r':\(\)\s*{\s*:\|:\s*&\s*}\s*;:'),
   RegExp(r'chmod\s+-R\s+777'),
   RegExp(r'chown\s+-R'),
   RegExp(r'find\s+.*-exec\s+rm'),
@@ -29,8 +28,22 @@ final _dangerousPatterns = [
   RegExp(r'pkill\s+-9'),
 ];
 
+final _confirmationPatterns = [
+  RegExp(r'\[y/N\]', caseSensitive: false),
+  RegExp(r'\[Y/n\]', caseSensitive: false),
+  RegExp(r'are you sure', caseSensitive: false),
+  RegExp(r'confirm', caseSensitive: false),
+  RegExp(r'warning', caseSensitive: false),
+  RegExp(r'proceed', caseSensitive: false),
+  RegExp(r'continue\?', caseSensitive: false),
+];
+
 bool isDangerousCommand(String command) {
   return _dangerousPatterns.any((p) => p.hasMatch(command));
+}
+
+bool containsConfirmationPrompt(String text) {
+  return _confirmationPatterns.any((p) => p.hasMatch(text));
 }
 
 class TerminalTab extends StatefulWidget {
@@ -44,6 +57,7 @@ class TerminalTab extends StatefulWidget {
 
 class _TerminalTabState extends State<TerminalTab> {
   final List<String> _history = [];
+  final List<String> _pendingCommands = [];
   final TextEditingController _controller = TextEditingController();
   final ScrollController _scrollController = ScrollController();
   final FocusNode _focusNode = FocusNode();
@@ -51,6 +65,7 @@ class _TerminalTabState extends State<TerminalTab> {
   bool _isConnected = false;
   String? _sessionId;
   List<QuickCommand> _quickCommands = [];
+  bool _awaitingConfirmation = false;
 
   @override
   void initState() {
@@ -127,6 +142,7 @@ class _TerminalTabState extends State<TerminalTab> {
         case 'created':
           _sessionId = msg['id'] ?? msg['sessionId'];
           _addOutput('终端已创建 (PID: ${msg['pid']}, Shell: ${msg['shell']})');
+          _flushPendingCommands();
           break;
         case 'switched':
           _addOutput('已切换到会话: ${msg['id']}');
@@ -139,25 +155,107 @@ class _TerminalTabState extends State<TerminalTab> {
           break;
         default:
           _addOutput(data);
+          _checkForConfirmationPrompt(data);
       }
     } catch (e) {
       _addOutput(data);
+      _checkForConfirmationPrompt(data);
     }
   }
 
-  void _sendCommand(String command) async {
+  void _checkForConfirmationPrompt(String text) {
+    if (!_awaitingConfirmation && containsConfirmationPrompt(text)) {
+      _awaitingConfirmation = true;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        _showTerminalConfirmationDialog(text);
+      });
+    }
+  }
+
+  void _showTerminalConfirmationDialog(String prompt) {
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => AlertDialog(
+        title: Row(
+          children: [
+            Icon(Icons.help_outline, color: Colors.orange),
+            SizedBox(width: 8),
+            Text('确认操作'),
+          ],
+        ),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text('终端请求确认：'),
+            SizedBox(height: 8),
+            Container(
+              padding: EdgeInsets.all(8),
+              color: Colors.grey[200],
+              child: Text(prompt, style: TextStyle(fontFamily: 'monospace', fontSize: 12)),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () {
+              Navigator.pop(ctx);
+              _awaitingConfirmation = false;
+              _sendConfirmationInput('n');
+            },
+            child: const Text('否 (N)'),
+          ),
+          FilledButton(
+            onPressed: () {
+              Navigator.pop(ctx);
+              _awaitingConfirmation = false;
+              _sendConfirmationInput('y');
+            },
+            child: const Text('是 (Y)'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  void _sendConfirmationInput(String input) {
+    if (_channel != null && _sessionId != null) {
+      _channel?.sink.add(jsonEncode({
+        'type': 'input',
+        'data': input,
+        'sessionId': _sessionId,
+      }));
+    }
+  }
+
+  void _flushPendingCommands() {
+    if (_pendingCommands.isEmpty) return;
+    for (final cmd in _pendingCommands) {
+      _sendCommandImmediate(cmd);
+    }
+    _pendingCommands.clear();
+  }
+
+  void _sendCommand(String command) {
     if (command.trim().isEmpty) return;
     if (!_isConnected) {
       _addOutput('未连接到服务器');
       return;
     }
     if (isDangerousCommand(command)) {
-      final confirmed = await _showDangerousCommandDialog(command);
-      if (!confirmed) {
-        _addOutput('\$ $command (已取消)');
-        return;
-      }
+      _showDangerousCommandDialog(command);
+      return;
     }
+    if (_sessionId == null) {
+      _pendingCommands.add(command);
+      _addOutput('\$ $command (等待连接...)');
+      return;
+    }
+    _sendCommandImmediate(command);
+  }
+
+  void _sendCommandImmediate(String command) {
     _addOutput('\$ $command');
     _channel?.sink.add(jsonEncode({
       'type': 'input',
@@ -168,8 +266,8 @@ class _TerminalTabState extends State<TerminalTab> {
     _scrollToBottom();
   }
 
-  Future<bool> _showDangerousCommandDialog(String command) async {
-    return await showDialog<bool>(
+  void _showDangerousCommandDialog(String command) {
+    showDialog(
       context: context,
       builder: (ctx) => AlertDialog(
         title: Row(
@@ -195,15 +293,29 @@ class _TerminalTabState extends State<TerminalTab> {
           ],
         ),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('取消')),
+          TextButton(
+            onPressed: () {
+              Navigator.pop(ctx);
+              _addOutput('\$ $command (已取消)');
+            },
+            child: const Text('取消'),
+          ),
           FilledButton(
             style: FilledButton.styleFrom(backgroundColor: Colors.red),
-            onPressed: () => Navigator.pop(ctx, true), 
+            onPressed: () {
+              Navigator.pop(ctx);
+              if (_sessionId == null) {
+                _pendingCommands.add(command);
+                _addOutput('\$ $command (等待连接...)');
+                return;
+              }
+              _sendCommandImmediate(command);
+            },
             child: const Text('确认执行'),
           ),
         ],
       ),
-    ) ?? false;
+    );
   }
 
   void _addOutput(String text) {

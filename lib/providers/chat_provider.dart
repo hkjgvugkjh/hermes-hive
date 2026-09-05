@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'package:flutter/foundation.dart';
 import '../models/models.dart';
 import '../providers/server_provider.dart';
@@ -6,13 +7,50 @@ import '../providers/debug_logger.dart';
 import '../providers/prompt_provider.dart';
 import '../services/prompt_storage.dart';
 
-/// View mode for the session list
+final _dangerousCommandPatterns = [
+  RegExp(r'rm\s+-[rfRF]+\s+/'),
+  RegExp(r'rm\s+-[rfRF]+\s+\*'),
+  RegExp(r'rm\s+-[rfRF]+\s+\.'),
+  RegExp(r'sudo\s+rm'),
+  RegExp(r'sudo\s+dd'),
+  RegExp(r'sudo\s+mkfs'),
+  RegExp(r'sudo\s+fdisk'),
+  RegExp(r'sudo\s+chmod\s+-R\s+777'),
+  RegExp(r'sudo\s+chown\s+-R'),
+  RegExp(r'format\s+'),
+  RegExp(r'dd\s+if='),
+  RegExp(r'mkfs\.'),
+  RegExp(r':\(\)\s*{\s*:\|:\s*&\s*}\s*;:'),
+  RegExp(r'chmod\s+-R\s+777'),
+  RegExp(r'chown\s+-R\s+root'),
+  RegExp(r'find\s+/.*-exec\s+rm'),
+  RegExp(r'git\s+push\s+--force'),
+  RegExp(r'git\s+push\s+-f'),
+  RegExp(r'git\s+reset\s+--hard'),
+  RegExp(r'git\s+clean\s+-fd'),
+  RegExp(r'git\s+checkout\s+--\s+\.'),
+  RegExp(r'docker\s+rm\s+-f'),
+  RegExp(r'docker\s+system\s+prune\s+-af'),
+  RegExp(r'npm\s+uninstall\s+-g'),
+  RegExp(r'pip\s+uninstall\s+-y'),
+  RegExp(r'shutdown\s+'),
+  RegExp(r'reboot\s+'),
+  RegExp(r'kill\s+-9'),
+  RegExp(r'pkill\s+-9'),
+  RegExp(r'killall\s+-9'),
+  RegExp(r'curl\s+.*\|\s*sh'),
+  RegExp(r'wget\s+.*\|\s*sh'),
+];
+
+bool containsDangerousCommand(String text) {
+  return _dangerousCommandPatterns.any((p) => p.hasMatch(text));
+}
+
 enum SessionViewMode {
   all,
   recent,
 }
 
-/// Chat state provider for managing conversations
 class ChatProvider extends ChangeNotifier {
   final ServerProvider _serverProvider;
   final GlobalConfigProvider _globalConfigProvider;
@@ -32,16 +70,16 @@ class ChatProvider extends ChangeNotifier {
   String? _selectedProvider;
   bool _isLoadingModels = false;
   
-  // Session view mode
   SessionViewMode _sessionViewMode = SessionViewMode.all;
   final Map<String, List<HermesSession>> _serverSessionsCache = {};
-  final Map<String, DateTime> _sessionActivity = {}; // sessionId -> last activity
+  final Map<String, DateTime> _sessionActivity = {};
   
-  // Auto-continue mode state
   bool _autoContinueEnabled = false;
   int _autoContinueDoneCount = 0;
   final String _autoContinuePrompt = '完成后回复OK，全部完成回复DONE';
   final String _autoContinueFollowUp = '继续，完成后回复OK，全部完成回复DONE';
+  bool _awaitingUserConfirmation = false;
+  String? _pendingDangerousOutput;
 
   ChatProvider(this._serverProvider, this._globalConfigProvider) {
     _serverProvider.addListener(_onServerProviderChange);
@@ -86,10 +124,7 @@ class ChatProvider extends ChangeNotifier {
     if (currentId != null) {
       _needsLogin = false;
       _isLoggedIn = false;
-      DebugLogger.instance.info(
-        'Server changed',
-        'newServer=${_serverProvider.activeServer?.name} id=$currentId',
-      );
+      DebugLogger.instance.info('Server changed', 'newServer=${_serverProvider.activeServer?.name} id=$currentId');
       loadSessions();
     }
   }
@@ -107,14 +142,13 @@ class ChatProvider extends ChangeNotifier {
   String? get selectedProvider => _selectedProvider;
   bool get isLoadingModels => _isLoadingModels;
   SessionViewMode get sessionViewMode => _sessionViewMode;
-  
-  // Auto-continue getters
   bool get autoContinueEnabled => _autoContinueEnabled;
   int get autoContinueDoneCount => _autoContinueDoneCount;
   String get autoContinuePrompt => _autoContinuePrompt;
   String get autoContinueFollowUp => _autoContinueFollowUp;
+  bool get awaitingUserConfirmation => _awaitingUserConfirmation;
+  String? get pendingDangerousOutput => _pendingDangerousOutput;
 
-  /// Get sessions to display based on current view mode
   List<HermesSession> get displaySessions {
     final server = _serverProvider.activeServer;
     if (server == null) return [];
@@ -125,7 +159,6 @@ class ChatProvider extends ChangeNotifier {
     return _sessions;
   }
 
-  /// Get recent sessions across all servers
   List<HermesSession> getRecentSessions([String? forServerId]) {
     final allSessions = <HermesSession>[];
     
@@ -138,7 +171,6 @@ class ChatProvider extends ChangeNotifier {
       );
       
       for (final session in sessions) {
-        // Only include sessions with recent activity (last 24 hours or manually tracked)
         final lastActivity = _sessionActivity[session.id] ?? session.updatedAt;
         if (lastActivity != null) {
           final age = DateTime.now().difference(lastActivity);
@@ -153,7 +185,6 @@ class ChatProvider extends ChangeNotifier {
       }
     }
     
-    // Sort by most recent first
     allSessions.sort((a, b) {
       final aTime = _sessionActivity[a.id] ?? a.updatedAt ?? DateTime(1970);
       final bTime = _sessionActivity[b.id] ?? b.updatedAt ?? DateTime(1970);
@@ -163,9 +194,7 @@ class ChatProvider extends ChangeNotifier {
     return allSessions;
   }
 
-  /// Determine session status based on recent messages
   SessionStatus _getSessionStatus(HermesSession session) {
-    // If we have current messages for this session, check the last message
     if (_currentSessionId == session.id && _currentMessages.isNotEmpty) {
       final lastMsg = _currentMessages.last;
       if (lastMsg.role == 'assistant') {
@@ -176,7 +205,6 @@ class ChatProvider extends ChangeNotifier {
       }
     }
     
-    // Default: check if session has recent activity
     final lastActivity = _sessionActivity[session.id] ?? session.updatedAt;
     if (lastActivity != null) {
       final age = DateTime.now().difference(lastActivity);
@@ -188,7 +216,6 @@ class ChatProvider extends ChangeNotifier {
     return SessionStatus.unknown;
   }
 
-  /// Toggle session view mode
   void toggleSessionViewMode() {
     _sessionViewMode = _sessionViewMode == SessionViewMode.all 
         ? SessionViewMode.recent 
@@ -196,13 +223,11 @@ class ChatProvider extends ChangeNotifier {
     notifyListeners();
   }
 
-  /// Set session view mode
   void setSessionViewMode(SessionViewMode mode) {
     _sessionViewMode = mode;
     notifyListeners();
   }
 
-  /// Load sessions from the active server (always fetch from remote)
   Future<void> loadSessions() async {
     final server = _serverProvider.activeServer;
     if (server == null) {
@@ -244,7 +269,6 @@ class ChatProvider extends ChangeNotifier {
           }
         }
       } else {
-        // Direct mode: auto-detect auth and login
         DebugLogger.instance.info('Direct mode: ensureLoggedIn', 'server=${server.name}');
         final client = _serverProvider.getClient(server);
         final loginResult = await client.ensureLoggedIn();
@@ -272,12 +296,10 @@ class ChatProvider extends ChangeNotifier {
     notifyListeners();
   }
 
-  /// Refresh sessions from remote (can be called manually)
   Future<void> refreshSessions() async {
     final server = _serverProvider.activeServer;
     if (server == null) return;
     
-    // Don't show loading indicator for background refresh
     try {
       if (_globalConfigProvider.isProxyMode) {
         final proxyClient = _serverProvider.getProxyClient(server);
@@ -312,7 +334,6 @@ class ChatProvider extends ChangeNotifier {
     notifyListeners();
   }
 
-  /// Retry login with updated credentials
   Future<bool> retryLogin(String username, String password) async {
     final server = _serverProvider.activeServer;
     if (server == null) return false;
@@ -340,7 +361,6 @@ class ChatProvider extends ChangeNotifier {
     }
   }
 
-  /// Select a session and load its messages
   Future<void> selectSession(String sessionId) async {
     final server = _serverProvider.activeServer;
     if (server == null) return;
@@ -395,7 +415,6 @@ class ChatProvider extends ChangeNotifier {
     notifyListeners();
   }
 
-  /// Send a message with optional model/provider and auto-continue logic
   Future<void> sendMessage(String input, {String? model, String? provider}) async {
     final server = _serverProvider.activeServer;
     if (server == null || input.trim().isEmpty) return;
@@ -404,13 +423,11 @@ class ChatProvider extends ChangeNotifier {
     _error = null;
     notifyListeners();
 
-    // Append auto-continue suffix if enabled
     String finalInput = input.trim();
     if (_autoContinueEnabled) {
       finalInput = '$finalInput\n$_autoContinuePrompt';
     }
 
-    // Add user message immediately
     final userMessage = ChatMessage(role: 'user', content: input.trim());
     _currentMessages.add(userMessage);
     _saveUserPrompts([userMessage]);
@@ -463,19 +480,15 @@ class ChatProvider extends ChangeNotifier {
         content: content,
       ));
       
-      // Track session activity
       if (_currentSessionId != null) {
         _sessionActivity[_currentSessionId!] = DateTime.now();
       }
       
-      // Update session ID if this was a new session
       if (_currentSessionId == null && newSessionId != null) {
         _currentSessionId = newSessionId;
       }
-      // Reload sessions list to show new session
       await loadSessions();
 
-      // Auto-continue logic: check response for OK/DONE
       if (_autoContinueEnabled) {
         _handleAutoContinueResponse(content);
       }
@@ -492,32 +505,26 @@ class ChatProvider extends ChangeNotifier {
     notifyListeners();
   }
 
-  /// Handle auto-continue response detection
   void _handleAutoContinueResponse(String content) {
     final trimmed = content.trim();
     
-    // Check for DONE first (takes priority)
     if (trimmed.contains('DONE')) {
       _autoContinueDoneCount++;
       DebugLogger.instance.info('Auto-continue', 'DONE detected ($_autoContinueDoneCount/3)');
       
       if (_autoContinueDoneCount >= 3) {
-        // 3 consecutive DONEs - exit auto-continue mode
         DebugLogger.instance.success('Auto-continue: 3 DONEs received, exiting mode');
         _autoContinueEnabled = false;
         _autoContinueDoneCount = 0;
         return;
       }
     } else if (trimmed.contains('OK')) {
-      // OK resets DONE count (intermediate response)
       _autoContinueDoneCount = 0;
       DebugLogger.instance.info('Auto-continue', 'OK detected, resetting DONE count');
     }
     
-    // If auto-continue still enabled and we got OK (or non-DONE response), send follow-up
     if (_autoContinueEnabled && !trimmed.contains('DONE')) {
       DebugLogger.instance.info('Auto-continue', 'Sending follow-up message');
-      // Use a small delay to avoid overwhelming the server
       Future.delayed(const Duration(milliseconds: 500), () {
         if (_autoContinueEnabled) {
           sendMessage(_autoContinueFollowUp);
@@ -526,7 +533,6 @@ class ChatProvider extends ChangeNotifier {
     }
   }
 
-  /// Start a new chat session
   void newSession() {
     _currentSessionId = null;
     _currentMessages = [];
@@ -534,7 +540,6 @@ class ChatProvider extends ChangeNotifier {
     notifyListeners();
   }
 
-  /// Load available model groups from the server
   Future<void> loadModelGroups() async {
     final server = _serverProvider.activeServer;
     if (server == null) return;
@@ -547,7 +552,6 @@ class ChatProvider extends ChangeNotifier {
       final groups = await client.fetchModelGroups();
       _modelGroups = groups;
       if (groups.isNotEmpty && _selectedModel == null) {
-        // Auto-select first model from first group
         final firstGroup = groups.first;
         if (firstGroup.models.isNotEmpty) {
           _selectedModel = firstGroup.models.first.id;
@@ -563,14 +567,12 @@ class ChatProvider extends ChangeNotifier {
     notifyListeners();
   }
 
-  /// Set selected model
   void selectModel(String modelId, String providerKey) {
     _selectedModel = modelId;
     _selectedProvider = providerKey;
     notifyListeners();
   }
 
-  /// Delete a session
   Future<void> deleteSession(String sessionId) async {
     final server = _serverProvider.activeServer;
     if (server == null) return;
@@ -596,7 +598,6 @@ class ChatProvider extends ChangeNotifier {
     await loadSessions();
   }
 
-  /// Rename a session
   Future<void> renameSession(String sessionId, String title) async {
     final server = _serverProvider.activeServer;
     if (server == null) return;
@@ -610,29 +611,25 @@ class ChatProvider extends ChangeNotifier {
           method: 'POST',
           path: '/api/studio/sessions/$sessionId/rename',
           headers: {'Content-Type': 'application/json'},
-          body: {'title': title}.toString().codeUnits,
+          body: jsonEncode({'title': title}).codeUnits,
         );
       }
     } else {
       final client = _serverProvider.getClient(server);
       await client.renameSession(sessionId, title);
     }
+
     await loadSessions();
   }
 
-  void clearError() {
-    _error = null;
-    notifyListeners();
-  }
-
-  /// Toggle auto-continue mode
   void toggleAutoContinue() {
     _autoContinueEnabled = !_autoContinueEnabled;
-    _autoContinueDoneCount = 0;
+    if (_autoContinueEnabled) {
+      _autoContinueDoneCount = 0;
+    }
     notifyListeners();
   }
 
-  /// Disable auto-continue mode
   void disableAutoContinue() {
     _autoContinueEnabled = false;
     _autoContinueDoneCount = 0;
