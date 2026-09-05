@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -28,22 +29,8 @@ final _dangerousPatterns = [
   RegExp(r'pkill\s+-9'),
 ];
 
-final _confirmationPatterns = [
-  RegExp(r'\[y/N\]', caseSensitive: false),
-  RegExp(r'\[Y/n\]', caseSensitive: false),
-  RegExp(r'are you sure', caseSensitive: false),
-  RegExp(r'confirm', caseSensitive: false),
-  RegExp(r'warning', caseSensitive: false),
-  RegExp(r'proceed', caseSensitive: false),
-  RegExp(r'continue\?', caseSensitive: false),
-];
-
 bool isDangerousCommand(String command) {
   return _dangerousPatterns.any((p) => p.hasMatch(command));
-}
-
-bool containsConfirmationPrompt(String text) {
-  return _confirmationPatterns.any((p) => p.hasMatch(text));
 }
 
 class TerminalTab extends StatefulWidget {
@@ -57,7 +44,6 @@ class TerminalTab extends StatefulWidget {
 
 class _TerminalTabState extends State<TerminalTab> {
   final List<String> _history = [];
-  final List<String> _pendingCommands = [];
   final TextEditingController _controller = TextEditingController();
   final ScrollController _scrollController = ScrollController();
   final FocusNode _focusNode = FocusNode();
@@ -65,7 +51,6 @@ class _TerminalTabState extends State<TerminalTab> {
   bool _isConnected = false;
   String? _sessionId;
   List<QuickCommand> _quickCommands = [];
-  bool _awaitingConfirmation = false;
 
   @override
   void initState() {
@@ -90,15 +75,18 @@ class _TerminalTabState extends State<TerminalTab> {
       final client = HermesApiClient(widget.server);
       final loggedIn = await client.ensureLoggedIn();
       
-      if (!loggedIn || client.token == null || client.token!.isEmpty) {
-        _addOutput('错误: 无法获取认证令牌，请先登录');
+      if (!loggedIn) {
+        _addOutput('错误: 登录失败，请检查用户名和密码');
         return;
       }
       
-      final token = client.token!;
+      final token = client.token;
       final wsScheme = widget.server.baseUrl.startsWith('https') ? 'wss' : 'ws';
       final host = widget.server.baseUrl.replaceFirst(RegExp(r'^https?://'), '');
-      final uri = Uri.parse('$wsScheme://$host/api/hermes/terminal?token=$token');
+      
+      final uri = token != null && token.isNotEmpty
+          ? Uri.parse('$wsScheme://$host/api/hermes/terminal?token=$token')
+          : Uri.parse('$wsScheme://$host/api/hermes/terminal');
       
       DebugLogger.instance.info('Terminal: connecting to $uri');
       
@@ -122,10 +110,6 @@ class _TerminalTabState extends State<TerminalTab> {
           DebugLogger.instance.error('Terminal WebSocket error', e.toString());
         },
       );
-      
-      _channel?.sink.add(jsonEncode({
-        'type': 'create',
-      }));
     } catch (e) {
       _addOutput('连接失败: $e');
       DebugLogger.instance.error('Terminal connection failed', e.toString());
@@ -133,7 +117,7 @@ class _TerminalTabState extends State<TerminalTab> {
   }
 
   void _handleMessage(String data) {
-    DebugLogger.instance.info('Terminal received: $data');
+    DebugLogger.instance.info('Terminal received: ${data.length} chars');
     try {
       final msg = jsonDecode(data);
       final type = msg['type'];
@@ -142,7 +126,6 @@ class _TerminalTabState extends State<TerminalTab> {
         case 'created':
           _sessionId = msg['id'] ?? msg['sessionId'];
           _addOutput('终端已创建 (PID: ${msg['pid']}, Shell: ${msg['shell']})');
-          _flushPendingCommands();
           break;
         case 'switched':
           _addOutput('已切换到会话: ${msg['id']}');
@@ -155,86 +138,11 @@ class _TerminalTabState extends State<TerminalTab> {
           break;
         default:
           _addOutput(data);
-          _checkForConfirmationPrompt(data);
       }
     } catch (e) {
+      // Raw terminal output (not JSON)
       _addOutput(data);
-      _checkForConfirmationPrompt(data);
     }
-  }
-
-  void _checkForConfirmationPrompt(String text) {
-    if (!_awaitingConfirmation && containsConfirmationPrompt(text)) {
-      _awaitingConfirmation = true;
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        _showTerminalConfirmationDialog(text);
-      });
-    }
-  }
-
-  void _showTerminalConfirmationDialog(String prompt) {
-    showDialog(
-      context: context,
-      barrierDismissible: false,
-      builder: (ctx) => AlertDialog(
-        title: Row(
-          children: [
-            Icon(Icons.help_outline, color: Colors.orange),
-            SizedBox(width: 8),
-            Text('确认操作'),
-          ],
-        ),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text('终端请求确认：'),
-            SizedBox(height: 8),
-            Container(
-              padding: EdgeInsets.all(8),
-              color: Colors.grey[200],
-              child: Text(prompt, style: TextStyle(fontFamily: 'monospace', fontSize: 12)),
-            ),
-          ],
-        ),
-        actions: [
-          TextButton(
-            onPressed: () {
-              Navigator.pop(ctx);
-              _awaitingConfirmation = false;
-              _sendConfirmationInput('n');
-            },
-            child: const Text('否 (N)'),
-          ),
-          FilledButton(
-            onPressed: () {
-              Navigator.pop(ctx);
-              _awaitingConfirmation = false;
-              _sendConfirmationInput('y');
-            },
-            child: const Text('是 (Y)'),
-          ),
-        ],
-      ),
-    );
-  }
-
-  void _sendConfirmationInput(String input) {
-    if (_channel != null && _sessionId != null) {
-      _channel?.sink.add(jsonEncode({
-        'type': 'input',
-        'data': input,
-        'sessionId': _sessionId,
-      }));
-    }
-  }
-
-  void _flushPendingCommands() {
-    if (_pendingCommands.isEmpty) return;
-    for (final cmd in _pendingCommands) {
-      _sendCommandImmediate(cmd);
-    }
-    _pendingCommands.clear();
   }
 
   void _sendCommand(String command) {
@@ -243,25 +151,17 @@ class _TerminalTabState extends State<TerminalTab> {
       _addOutput('未连接到服务器');
       return;
     }
+    if (_sessionId == null) {
+      _addOutput('等待终端连接...');
+      return;
+    }
     if (isDangerousCommand(command)) {
       _showDangerousCommandDialog(command);
       return;
     }
-    if (_sessionId == null) {
-      _pendingCommands.add(command);
-      _addOutput('\$ $command (等待连接...)');
-      return;
-    }
-    _sendCommandImmediate(command);
-  }
-
-  void _sendCommandImmediate(String command) {
     _addOutput('\$ $command');
-    _channel?.sink.add(jsonEncode({
-      'type': 'input',
-      'data': command,
-      'sessionId': _sessionId,
-    }));
+    // Hermes terminal protocol: send raw text directly to PTY
+    _channel?.sink.add('$command\n');
     _controller.clear();
     _scrollToBottom();
   }
@@ -304,12 +204,9 @@ class _TerminalTabState extends State<TerminalTab> {
             style: FilledButton.styleFrom(backgroundColor: Colors.red),
             onPressed: () {
               Navigator.pop(ctx);
-              if (_sessionId == null) {
-                _pendingCommands.add(command);
-                _addOutput('\$ $command (等待连接...)');
-                return;
-              }
-              _sendCommandImmediate(command);
+              _channel?.sink.add('$command\n');
+              _controller.clear();
+              _scrollToBottom();
             },
             child: const Text('确认执行'),
           ),
@@ -447,7 +344,7 @@ class _TerminalTabState extends State<TerminalTab> {
                         },
                       ),
               ),
-            ],
+            ]
           ),
         ),
         const VerticalDivider(width: 1),
@@ -500,7 +397,7 @@ class _TerminalTabState extends State<TerminalTab> {
                     itemCount: _history.length,
                     itemBuilder: (context, index) {
                       return SelectableText.rich(
-                        _parseAnsiText(_history[index]),
+                        _parseAnsiToTextSpan(_history[index]),
                         style: const TextStyle(fontFamily: 'monospace', fontSize: 13),
                       );
                     },
@@ -562,84 +459,156 @@ class _TerminalTabState extends State<TerminalTab> {
                   ],
                 ),
               ),
-            ],
+            ]
           ),
         ),
       ],
     );
   }
 
-  TextSpan _parseAnsiText(String text) {
+  TextSpan _parseAnsiToTextSpan(String text) {
     final spans = <TextSpan>[];
-    final regex = RegExp(r'\x1B\[([0-9;]*)([A-Za-z])');
-    int lastEnd = 0;
+    final buffer = StringBuffer();
     
     Color currentColor = Colors.greenAccent;
     Color? currentBgColor;
     bool isBold = false;
     
-    for (final match in regex.allMatches(text)) {
-      if (match.start > lastEnd) {
-        spans.add(TextSpan(
-          text: text.substring(lastEnd, match.start),
-          style: TextStyle(
-            color: currentColor,
-            backgroundColor: currentBgColor,
-            fontWeight: isBold ? FontWeight.bold : FontWeight.normal,
-          ),
-        ));
-      }
-      
-      final params = match.group(1) ?? '';
-      final command = match.group(2) ?? '';
-      
-      if (command == 'm') {
-        final codes = params.isEmpty ? [0] : params.split(';').map((s) => int.tryParse(s) ?? 0).toList();
-        
-        for (final code in codes) {
-          switch (code) {
-            case 0:
-              currentColor = Colors.greenAccent;
-              currentBgColor = null;
-              isBold = false;
-              break;
-            case 1:
-              isBold = true;
-              break;
-            case 30: currentColor = Colors.black; break;
-            case 31: currentColor = Colors.red; break;
-            case 32: currentColor = Colors.green; break;
-            case 33: currentColor = Colors.yellow; break;
-            case 34: currentColor = Colors.blue; break;
-            case 35: currentColor = Colors.purple; break;
-            case 36: currentColor = Colors.cyan; break;
-            case 37: currentColor = Colors.white; break;
-            case 90: currentColor = Colors.grey; break;
-            case 91: currentColor = Colors.redAccent; break;
-            case 92: currentColor = Colors.lightGreen; break;
-            case 93: currentColor = const Color(0xFFFFFF00); break;
-            case 94: currentColor = Colors.lightBlue; break;
-            case 95: currentColor = Colors.pink; break;
-            case 96: currentColor = Colors.lightBlue; break;
-            case 97: currentColor = Colors.white; break;
-            case 40: currentBgColor = Colors.black; break;
-            case 41: currentBgColor = Colors.red; break;
-            case 42: currentBgColor = Colors.green; break;
-            case 43: currentBgColor = Colors.yellow; break;
-            case 44: currentBgColor = Colors.blue; break;
-            case 45: currentBgColor = Colors.purple; break;
-            case 46: currentBgColor = Colors.cyan; break;
-            case 47: currentBgColor = Colors.white; break;
-          }
+    int i = 0;
+    while (i < text.length) {
+      // Check for ESC character (0x1B)
+      if (text.codeUnitAt(i) == 0x1B) {
+        // Flush buffer
+        if (buffer.isNotEmpty) {
+          spans.add(TextSpan(
+            text: buffer.toString(),
+            style: TextStyle(
+              color: currentColor,
+              backgroundColor: currentBgColor,
+              fontWeight: isBold ? FontWeight.bold : FontWeight.normal,
+            ),
+          ));
+          buffer.clear();
         }
+        
+        if (i + 1 >= text.length) {
+          i++;
+          continue;
+        }
+        
+        final nextChar = text[i + 1];
+        
+        // Handle CSI sequences: ESC[...
+        if (nextChar == '[') {
+          int j = i + 2;
+          final params = <int>[];
+          String paramBuffer = '';
+          
+          while (j < text.length) {
+            final c = text[j];
+            final cCode = c.codeUnitAt(0);
+            
+            // Parameter bytes: 0x30-0x3F (0-9, :, ;, <, =, >, ?)
+            if (cCode >= 0x30 && cCode <= 0x3F) {
+              paramBuffer += c;
+              j++;
+            }
+            // Intermediate bytes: 0x20-0x2F
+            else if (cCode >= 0x20 && cCode <= 0x2F) {
+              j++;
+            }
+            // Final byte: 0x40-0x7E
+            else {
+              if (paramBuffer.isNotEmpty) {
+                params.add(int.tryParse(paramBuffer) ?? 0);
+                paramBuffer = '';
+              }
+              
+              // Process SGR (color) codes: ESC[...m
+              if (c == 'm') {
+                for (final code in params) {
+                  switch (code) {
+                    case 0: // Reset
+                      currentColor = Colors.greenAccent;
+                      currentBgColor = null;
+                      isBold = false;
+                      break;
+                    case 1: // Bold/Bright
+                      isBold = true;
+                      break;
+                    case 22: // Normal intensity
+                      isBold = false;
+                      break;
+                    // Standard foreground colors
+                    case 30: currentColor = Colors.black; break;
+                    case 31: currentColor = const Color(0xFFCC0000); break;
+                    case 32: currentColor = const Color(0xFF00CC00); break;
+                    case 33: currentColor = const Color(0xFFCCCC00); break;
+                    case 34: currentColor = const Color(0xFF0000CC); break;
+                    case 35: currentColor = const Color(0xFFCC00CC); break;
+                    case 36: currentColor = const Color(0xFF00CCCC); break;
+                    case 37: currentColor = const Color(0xFFCCCCCC); break;
+                    case 39: currentColor = Colors.greenAccent; break;
+                    // Bright foreground colors
+                    case 90: currentColor = const Color(0xFF666666); break;
+                    case 91: currentColor = const Color(0xFFFF0000); break;
+                    case 92: currentColor = const Color(0xFF00FF00); break;
+                    case 93: currentColor = const Color(0xFFFFFF00); break;
+                    case 94: currentColor = const Color(0xFF0000FF); break;
+                    case 95: currentColor = const Color(0xFFFF00FF); break;
+                    case 96: currentColor = const Color(0xFF00FFFF); break;
+                    case 97: currentColor = Colors.white; break;
+                    // Standard background colors
+                    case 40: currentBgColor = Colors.black; break;
+                    case 41: currentBgColor = const Color(0xFFCC0000); break;
+                    case 42: currentBgColor = const Color(0xFF00CC00); break;
+                    case 43: currentBgColor = const Color(0xFFCCCC00); break;
+                    case 44: currentBgColor = const Color(0xFF0000CC); break;
+                    case 45: currentBgColor = const Color(0xFFCC00CC); break;
+                    case 46: currentBgColor = const Color(0xFF00CCCC); break;
+                    case 47: currentBgColor = const Color(0xFFCCCCCC); break;
+                    case 49: currentBgColor = null; break;
+                    // Bright background colors
+                    case 100: currentBgColor = const Color(0xFF666666); break;
+                    case 101: currentBgColor = const Color(0xFFFF0000); break;
+                    case 102: currentBgColor = const Color(0xFF00FF00); break;
+                    case 103: currentBgColor = const Color(0xFFFFFF00); break;
+                    case 104: currentBgColor = const Color(0xFF0000FF); break;
+                    case 105: currentBgColor = const Color(0xFFFF00FF); break;
+                    case 106: currentBgColor = const Color(0xFF00FFFF); break;
+                    case 107: currentBgColor = Colors.white; break;
+                  }
+                }
+              }
+              // Skip other CSI sequences (cursor movement, etc.)
+              j++;
+              break;
+            }
+          }
+          i = j;
+        }
+        // Handle OSC sequences: ESC]...BEL
+        else if (nextChar == ']') {
+          int j = i + 2;
+          while (j < text.length && text[j] != '\x07') {
+            j++;
+          }
+          i = j + 1; // Skip past BEL
+        }
+        // Handle simple ESC sequences
+        else {
+          i += 2;
+        }
+      } else {
+        buffer.write(text[i]);
+        i++;
       }
-      
-      lastEnd = match.end;
     }
     
-    if (lastEnd < text.length) {
+    // Flush remaining buffer
+    if (buffer.isNotEmpty) {
       spans.add(TextSpan(
-        text: text.substring(lastEnd),
+        text: buffer.toString(),
         style: TextStyle(
           color: currentColor,
           backgroundColor: currentBgColor,
