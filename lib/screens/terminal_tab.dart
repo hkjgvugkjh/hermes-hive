@@ -29,6 +29,10 @@ final _dangerousPatterns = [
   RegExp(r'pkill\s+-9'),
 ];
 
+bool isDangerousCommand(String command) {
+  return _dangerousPatterns.any((p) => p.hasMatch(command));
+}
+
 class TerminalTab extends StatefulWidget {
   final ServerConfig server;
 
@@ -40,9 +44,9 @@ class TerminalTab extends StatefulWidget {
 
 class _TerminalTabState extends State<TerminalTab> {
   final List<String> _history = [];
-  final List<String> _pendingCommands = [];
   final TextEditingController _controller = TextEditingController();
   final ScrollController _scrollController = ScrollController();
+  final FocusNode _focusNode = FocusNode();
   WebSocketChannel? _channel;
   bool _isConnected = false;
   String? _sessionId;
@@ -52,6 +56,9 @@ class _TerminalTabState extends State<TerminalTab> {
   void initState() {
     super.initState();
     _loadQuickCommands();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _focusNode.requestFocus();
+    });
   }
 
   @override
@@ -59,6 +66,7 @@ class _TerminalTabState extends State<TerminalTab> {
     _channel?.sink.close();
     _controller.dispose();
     _scrollController.dispose();
+    _focusNode.dispose();
     super.dispose();
   }
 
@@ -119,7 +127,6 @@ class _TerminalTabState extends State<TerminalTab> {
         case 'created':
           _sessionId = msg['id'] ?? msg['sessionId'];
           _addOutput('终端已创建 (PID: ${msg['pid']}, Shell: ${msg['shell']})');
-          _flushPendingCommands();
           break;
         case 'switched':
           _addOutput('已切换到会话: ${msg['id']}');
@@ -138,29 +145,12 @@ class _TerminalTabState extends State<TerminalTab> {
     }
   }
 
-  void _flushPendingCommands() {
-    if (_pendingCommands.isEmpty) return;
-    for (final cmd in _pendingCommands) {
-      _sendCommandImmediate(cmd);
-    }
-    _pendingCommands.clear();
-  }
-
-  void _sendCommand(String command) {
+  void _sendCommand(String command) async {
     if (command.trim().isEmpty) return;
     if (!_isConnected) {
       _addOutput('未连接到服务器');
       return;
     }
-    if (_sessionId == null) {
-      _pendingCommands.add(command);
-      _addOutput('\$ $command (等待连接...)');
-      return;
-    }
-    _sendCommandImmediate(command);
-  }
-
-  void _sendCommandImmediate(String command) async {
     if (isDangerousCommand(command)) {
       final confirmed = await _showDangerousCommandDialog(command);
       if (!confirmed) {
@@ -442,6 +432,7 @@ class _TerminalTabState extends State<TerminalTab> {
                     Expanded(
                       child: TextField(
                         controller: _controller,
+                        focusNode: _focusNode,
                         style: const TextStyle(fontFamily: 'monospace', fontSize: 13, color: Colors.greenAccent),
                         decoration: const InputDecoration(
                           border: InputBorder.none,
@@ -602,8 +593,4 @@ class QuickCommandStorage {
     final json = commands.map((c) => c.toJson()).toList();
     await prefs.setString(_key, jsonEncode(json));
   }
-}
-
-bool isDangerousCommand(String command) {
-  return _dangerousPatterns.any((p) => p.hasMatch(command));
 }
