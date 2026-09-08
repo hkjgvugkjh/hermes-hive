@@ -253,7 +253,7 @@ async function validateConfig() {
     host: document.getElementById('proxyHost').value.trim()
   };
   
-  // If host is provided, test connectivity and token validity from browser
+  // If host is provided, test connectivity from browser
   if (req.host) {
     resultDiv.innerHTML = '<div class="test-result">正在测试连接...</div>';
     
@@ -278,40 +278,26 @@ async function validateConfig() {
       hostname = hostname.substring(0, portIdx);
     }
     
-    // Use admin_port if no port in host
-    const adminPort = port || req.admin_port.replace(/^:/, '') || '8650';
-    
-    // Build admin URL for testing
-    const adminURL = scheme + '://' + hostname + ':' + adminPort + '/api/config';
+    // Build URL - only add port if explicitly specified
+    let healthURL = scheme + '://' + hostname;
+    if (port) {
+      healthURL += ':' + port;
+    }
+    healthURL += '/health';
     
     try {
+      // Use no-cors mode to test basic connectivity
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), 10000);
       
-      const resp = await fetch(adminURL, {
+      await fetch(healthURL, {
         method: 'GET',
-        headers: {
-          'Authorization': 'Bearer ' + req.admin_token
-        },
         signal: controller.signal,
-        mode: 'cors'
+        mode: 'no-cors'
       });
       
       clearTimeout(timeoutId);
-      
-      if (resp.status === 401) {
-        resultDiv.innerHTML = '<div class="test-result test-fail">✗ Token 无效（401 Unauthorized）</div>';
-        document.getElementById('btnSaveProxy').disabled = true;
-        btn.disabled = false;
-        btn.textContent = '验证配置';
-        return;
-      } else if (resp.status !== 200) {
-        resultDiv.innerHTML = '<div class="test-result test-fail">✗ 连接异常: HTTP ' + resp.status + '</div>';
-        document.getElementById('btnSaveProxy').disabled = true;
-        btn.disabled = false;
-        btn.textContent = '验证配置';
-        return;
-      }
+      // If we get here, the server is reachable (even if response is opaque)
     } catch (e) {
       resultDiv.innerHTML = '<div class="test-result test-fail">✗ 连接失败: ' + e.message + '</div>';
       document.getElementById('btnSaveProxy').disabled = true;
@@ -356,14 +342,20 @@ async function validateConfig() {
         hostname = hostname.substring(0, portIdx);
       }
       
-      // Use listen port if no port in host
-      const wsPort = port || req.listen.replace(/^:/, '') || '8649';
-      const adminPort = port || req.admin_port.replace(/^:/, '') || '8650';
+      // Build WebSocket URL
+      let wsUrl = scheme + '://' + hostname;
+      if (port) {
+        wsUrl += ':' + port;
+      }
+      wsUrl += req.ws_path;
       
-      const wsUrl = scheme + '://' + hostname + ':' + wsPort + req.ws_path;
-      const adminUrl = (scheme === 'wss' ? 'https://' : 'http://') + hostname + ':' + adminPort;
+      // Build admin URL
+      let adminUrl = (scheme === 'wss' ? 'https://' : 'http://') + hostname;
+      if (port) {
+        adminUrl += ':' + port;
+      }
+      
       const token = req.token || '';
-      
       const qrContent = 'hermes-proxy://' + wsUrl + '?token=' + encodeURIComponent(token) + '&admin=' + encodeURIComponent(adminUrl);
       
       // Clear previous QR
