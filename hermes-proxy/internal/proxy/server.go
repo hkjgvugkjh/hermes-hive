@@ -17,6 +17,7 @@ import (
 	"hermes-proxy/internal/auth"
 	"hermes-proxy/internal/config"
 	"hermes-proxy/internal/crypto"
+	"hermes-proxy/internal/di"
 	"hermes-proxy/internal/protocol"
 )
 
@@ -36,9 +37,30 @@ type Client struct {
 	Conn           *websocket.Conn
 	SharedKey      []byte
 	ServerID       string // currently active server
+	tunnels        *wsTunnelSet
 	mu             sync.Mutex
 	pending        map[string]chan *protocol.HTTPResponsePayload
 	pendingCounter uint64
+
+	// DI control-plane state
+	active       *activeBackend // current connected backend (DI)
+	voiceSession string         // session_id targeted by an in-progress voice cmd
+}
+
+// wsFrameBinary is the websocket message type used for DI/control frames.
+const wsFrameBinary = 2 // websocket.BinaryMessage
+
+// diTypes is the set of DI control message types forwarded to handleDI.
+var diTypes = map[protocol.MessageType]bool{
+	protocol.MessageType(di.TypeDIConnect):       true,
+	protocol.MessageType(di.TypeDIList):          true,
+	protocol.MessageType(di.TypeDISessionPoll):   true,
+	protocol.MessageType(di.TypeDISwitchServer):  true,
+	protocol.MessageType(di.TypeDIVoiceCmd):      true,
+	protocol.MessageType(di.TypeDIVoiceData):     true,
+	protocol.MessageType(di.TypeDIAuthResp):     true,
+	protocol.MessageType(di.TypeDIEvent):         true,
+	protocol.MessageType(di.TypeDIPing):         true,
 }
 
 // NewServer creates a new proxy server.
@@ -171,6 +193,7 @@ func (s *Server) performHandshake(conn *websocket.Conn) (*Client, error) {
 		ID:        clientID,
 		Conn:      conn,
 		SharedKey: sharedKey,
+		tunnels:   newWSTunnelSet(),
 		pending:   make(map[string]chan *protocol.HTTPResponsePayload),
 	}, nil
 }
@@ -181,6 +204,13 @@ func (s *Server) handleClient(client *Client) {
 		s.mu.Lock()
 		delete(s.clients, client.ID)
 		s.mu.Unlock()
+		// Tear down any live tunnels so upstream sockets and their
+		// goroutines do not outlive the client.
+		if client.tunnels != nil {
+			client.tunnels.closeAll()
+		}
+		// Tear down the DI backend connection (studio adapter / poll loop).
+		s.detachBackend(client)
 		client.Conn.Close()
 		log.Printf("[proxy] Client disconnected: %s", client.ID)
 	}()
@@ -214,8 +244,20 @@ func (s *Server) handleClient(client *Client) {
 		switch msgType {
 		case protocol.TypeHTTPRequest:
 			s.handleHTTPRequest(client, payload)
+		case protocol.TypeWSOpen:
+			s.handleWSOpen(client, payload)
+		case protocol.TypeWSData:
+			s.handleWSData(client, payload)
+		case protocol.TypeWSClose:
+			s.handleWSClose(client, payload)
 		default:
-			log.Printf("[proxy] Unknown message type: 0x%02x", msgType)
+			if diTypes[msgType] {
+				// Import di as the lower transport package re-uses the same
+				// envelope; convert to di.MessageType for the handler.
+				s.handleDI(client, di.MessageType(msgType), payload)
+			} else {
+				log.Printf("[proxy] Unknown message type: 0x%02x", msgType)
+			}
 		}
 	}
 }

@@ -5,7 +5,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -42,11 +44,19 @@ func (s *Server) setupRoutes() {
 	s.mux.HandleFunc("/api/servers", s.handleAuth(s.handleServers))
 	s.mux.HandleFunc("/api/servers/", s.handleAuth(s.handleServerDetail))
 	s.mux.HandleFunc("/api/test", s.handleAuth(s.handleTestConnection))
-	s.mux.HandleFunc("/api/config", s.handleAuth(s.handleGetConfig))
+	s.mux.HandleFunc("/api/config", s.handleAuth(s.handleConfig))
+	s.mux.HandleFunc("/api/validate-config", s.handleAuth(s.handleValidateConfig))
 
 	// Web UI (static HTML/JS)
 	s.mux.HandleFunc("/", s.handleWebUI)
 	s.mux.HandleFunc("/index.html", s.handleWebUI)
+	s.mux.HandleFunc("/config", s.handleWebUI)
+	s.mux.HandleFunc("/qrcode.min.js", s.handleQRCodeJS)
+}
+
+// handleQRCodeJS serves the local qrcode.min.js file.
+func (s *Server) handleQRCodeJS(w http.ResponseWriter, r *http.Request) {
+	http.ServeFile(w, r, "qrcode.min.js")
 }
 
 // Run starts the admin HTTP server.
@@ -64,12 +74,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if s.cfg.AdminToken == "" {
-			// No admin token set, allow access
 			next(w, r)
 			return
 		}
 
-		// Check Authorization header
 		auth := r.Header.Get("Authorization")
 		if strings.HasPrefix(auth, "Bearer ") {
 			auth = auth[7:]
@@ -79,7 +87,6 @@ func (s *Server) handleAuth(next http.HandlerFunc) http.HandlerFunc {
 			return
 		}
 
-		// Check query param
 		if r.URL.Query().Get("token") == s.cfg.AdminToken {
 			next(w, r)
 			return
@@ -126,7 +133,6 @@ func (s *Server) handleServers(w http.ResponseWriter, r *http.Request) {
 
 // handleServerDetail handles GET, PUT, DELETE for a specific server.
 func (s *Server) handleServerDetail(w http.ResponseWriter, r *http.Request) {
-	// Extract server ID from /api/servers/{id}
 	id := strings.TrimPrefix(r.URL.Path, "/api/servers/")
 	if id == "" {
 		s.writeError(w, http.StatusBadRequest, "server ID required")
@@ -147,7 +153,7 @@ func (s *Server) handleServerDetail(w http.ResponseWriter, r *http.Request) {
 			s.writeError(w, http.StatusBadRequest, "invalid JSON")
 			return
 		}
-		server.ID = id // Ensure ID matches URL
+		server.ID = id
 		if server.Profile == "" {
 			server.Profile = "default"
 		}
@@ -194,7 +200,6 @@ func (s *Server) handleTestConnection(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Test the connection by hitting /health
 	client := &http.Client{Timeout: 10 * time.Second}
 	resp, err := client.Get(req.URL + "/health")
 	if err != nil {
@@ -206,7 +211,6 @@ func (s *Server) handleTestConnection(w http.ResponseWriter, r *http.Request) {
 	}
 	defer resp.Body.Close()
 
-	// If credentials provided, also test login
 	if req.Username != "" && req.Password != "" {
 		loginResp, err := client.Post(
 			req.URL+"/api/auth/login",
@@ -238,24 +242,161 @@ func (s *Server) handleTestConnection(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// handleGetConfig returns the current config (without sensitive data).
-func (s *Server) handleGetConfig(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
+// handleConfig handles GET (read) and PUT (update) the proxy configuration.
+func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		// Return current config with tokens for display in UI
+		resp := map[string]interface{}{
+			"listen":       s.cfg.Listen,
+			"ws_path":      s.cfg.WSPath,
+			"admin_path":   s.cfg.AdminPath,
+			"host":         s.cfg.Host,
+			"auth_method":  s.cfg.Auth.Method,
+			"token":        "",
+			"admin_token":  "",
+			"servers":      s.cfg.GetServers(),
+		}
+		if s.cfg.Auth.Method == "static_token" && s.cfg.Auth.StaticToken != nil {
+			resp["token"] = s.cfg.Auth.StaticToken.Token
+			resp["admin_token"] = s.cfg.AdminToken
+		}
+		s.writeJSON(w, http.StatusOK, resp)
+	case http.MethodPut:
+		var req struct {
+			Listen     string         `json:"listen"`
+			WSPath     string         `json:"ws_path"`
+			AdminPath  string         `json:"admin_path"`
+			Host       string         `json:"host"`
+			Auth       config.AuthConfig `json:"auth"`
+			AdminToken string         `json:"admin_token"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			s.writeError(w, http.StatusBadRequest, "invalid JSON")
+			return
+		}
+		if req.Listen != "" {
+			s.cfg.Listen = req.Listen
+		}
+		if req.WSPath != "" {
+			s.cfg.WSPath = req.WSPath
+		}
+		if req.AdminPath != "" {
+			s.cfg.AdminPath = req.AdminPath
+		}
+		if req.Host != "" {
+			s.cfg.Host = req.Host
+		}
+		if req.Auth.Method != "" {
+			s.cfg.Auth = req.Auth
+		}
+		if req.AdminToken != "" {
+			s.cfg.AdminToken = req.AdminToken
+		}
+		if err := s.cfg.Save(); err != nil {
+			s.writeError(w, http.StatusInternalServerError, "failed to save config")
+			return
+		}
+		s.writeJSON(w, http.StatusOK, map[string]interface{}{
+			"message": "config updated",
+		})
+	default:
+		s.writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+	}
+}
+
+// handleValidateConfig validates proxy configuration parameters.
+// Note: ports already used by this running proxy are considered valid.
+func (s *Server) handleValidateConfig(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
 		s.writeError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
+
+	var req struct {
+		Listen     string `json:"listen"`
+		WSPath     string `json:"ws_path"`
+		AdminPort  string `json:"admin_port"`
+		Token      string `json:"token"`
+		AdminToken string `json:"admin_token"`
+		Host       string `json:"host"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		s.writeError(w, http.StatusBadRequest, "invalid JSON")
+		return
+	}
+
+	var errors []string
+
+	// Parse current ports for comparison
+	currentListenPort := 0
+	currentAdminPort := 0
+	if p, err := strconv.Atoi(strings.TrimPrefix(s.cfg.Listen, ":")); err == nil {
+		currentListenPort = p
+	}
+	if p, err := strconv.Atoi(strings.TrimPrefix(s.cfg.AdminPath, ":")); err == nil {
+		currentAdminPort = p
+	}
+
+	// Validate listen port
+	if req.Listen == "" {
+		errors = append(errors, "WebSocket 监听端口不能为空")
+	} else {
+		port, err := strconv.Atoi(strings.TrimPrefix(req.Listen, ":"))
+		if err != nil || port < 1 || port > 65535 {
+			errors = append(errors, "WebSocket 监听端口无效（应为 1-65535）")
+		} else if port != currentListenPort {
+			// Only check availability if changing to a different port
+			ln, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
+			if err != nil {
+				errors = append(errors, fmt.Sprintf("端口 %d 已被其他程序占用", port))
+			} else {
+				ln.Close()
+			}
+		}
+		// If port == currentListenPort, it's our own proxy - OK
+	}
+
+	// Validate admin port
+	if req.AdminPort == "" {
+		errors = append(errors, "Admin 端口不能为空")
+	} else {
+		port, err := strconv.Atoi(strings.TrimPrefix(req.AdminPort, ":"))
+		if err != nil || port < 1 || port > 65535 {
+			errors = append(errors, "Admin 端口无效（应为 1-65535）")
+		} else if port != currentAdminPort {
+			// Only check availability if changing to a different port
+			ln, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
+			if err != nil {
+				errors = append(errors, fmt.Sprintf("端口 %d 已被其他程序占用", port))
+			} else {
+				ln.Close()
+			}
+		}
+		// If port == currentAdminPort, it's our own proxy - OK
+	}
+
+	// Validate WS path
+	if req.WSPath != "" && !strings.HasPrefix(req.WSPath, "/") {
+		errors = append(errors, "WebSocket 路径必须以 / 开头")
+	}
+
+	if len(errors) > 0 {
+		s.writeJSON(w, http.StatusOK, map[string]interface{}{
+			"valid":  false,
+			"errors": errors,
+		})
+		return
+	}
+
 	s.writeJSON(w, http.StatusOK, map[string]interface{}{
-		"listen":      s.cfg.Listen,
-		"ws_path":     s.cfg.WSPath,
-		"admin_path":  s.cfg.AdminPath,
-		"auth_method": s.cfg.Auth.Method,
-		"servers":     s.cfg.GetServers(),
+		"valid": true,
 	})
 }
 
 // handleWebUI serves the embedded web configuration UI.
 func (s *Server) handleWebUI(w http.ResponseWriter, r *http.Request) {
-	if r.URL.Path != "/" && r.URL.Path != "/index.html" {
+	if r.URL.Path != "/" && r.URL.Path != "/index.html" && r.URL.Path != "/config" {
 		http.NotFound(w, r)
 		return
 	}

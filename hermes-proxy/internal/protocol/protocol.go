@@ -22,6 +22,16 @@ const (
 	TypeHandshakeOK MessageType = 0x02 // Handshake acknowledgment
 	TypeHTTPRequest MessageType = 0x10 // Encrypted HTTP request
 	TypeHTTPResponse MessageType = 0x11 // Encrypted HTTP response
+
+	// WebSocket tunneling (used by hermes-reader to speak the 小方盒
+	// Socket.IO protocol through the proxy). The proxy acts as a relay:
+	// each ConnID maps to one upstream WebSocket on the target server.
+	TypeWSOpen    MessageType = 0x20 // C→S: open upstream WebSocket
+	TypeWSOpened  MessageType = 0x21 // S→C: upstream connected
+	TypeWSData    MessageType = 0x22 // both: WebSocket frame payload
+	TypeWSClose   MessageType = 0x23 // both: close connection
+	TypeWSError   MessageType = 0x24 // S→C: tunnel error
+
 	TypeError       MessageType = 0xFF // Error notification
 )
 
@@ -78,4 +88,44 @@ func DecodePayload(data []byte, v interface{}) error {
 type ErrorPayload struct {
 	Code    int    `json:"code"`
 	Message string `json:"message"`
+}
+
+// ---------------------------------------------------------------------------
+// WebSocket tunnel payloads
+// ---------------------------------------------------------------------------
+
+// WSOpenPayload is sent by the client to open an upstream WebSocket
+// connection to a target server through the proxy.
+type WSOpenPayload struct {
+	ConnID   string            `json:"conn_id"`   // client-generated connection id
+	ServerID string            `json:"server_id"` // target server identifier
+	Path     string            `json:"path"`      // e.g. /global-agent/?EIO=4&transport=websocket
+	Headers  map[string]string `json:"headers"`
+}
+
+// WSOpenedPayload confirms that the upstream WebSocket is connected.
+type WSOpenedPayload struct {
+	ConnID string `json:"conn_id"`
+}
+
+// WSDataPayload carries a single WebSocket frame in either direction.
+// The proxy does not inspect the payload — it is an opaque relay so that
+// protocols such as Socket.IO / Engine.IO work unmodified.
+type WSDataPayload struct {
+	ConnID string `json:"conn_id"`
+	Binary bool   `json:"binary"` // true = binary frame, false = text frame
+	Data   []byte `json:"data"`   // base64-encoded when marshalled to JSON
+}
+
+// WSClosePayload closes a tunnel. Sent by either side.
+type WSClosePayload struct {
+	ConnID string `json:"conn_id"`
+	Reason string `json:"reason,omitempty"`
+}
+
+// WSErrorPayload reports a tunnel failure to the client.
+type WSErrorPayload struct {
+	ConnID string `json:"conn_id"`
+	Code   int    `json:"code"`
+	Error  string `json:"error"`
 }

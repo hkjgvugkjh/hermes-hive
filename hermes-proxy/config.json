@@ -1,0 +1,42 @@
+{
+  "listen": ":8649",
+  "ws_path": "/ws",
+  "admin_path": ":8650",
+  "host": "hermes-proxy.willam.eu.org",
+  "auth": {
+    "method": "static_token",
+    "static_token": {
+      "token": "O1KseSrfoNAy8fIFFtIuK67gL6U2idIu"
+    }
+  },
+  "admin_token": "uFvnqlNTbQfRBPDXINLb9PimyOxnLeAW",
+  "servers": [
+    {
+      "id": "185",
+      "name": "185 Hermes Studio",
+      "url": "http://localhost:8648",
+      "type": "hermes_studio",
+      "enabled": true,
+      "username": "admin",
+      "password": "123456",
+      "profile": "default"
+    },
+    {
+      "id": "77",
+      "name": "77 hermes",
+      "url": "http://10.10.164.77:8648",
+      "type": "hermes_studio",
+      "enabled": true,
+      "profile": "default"
+    },
+    {
+      "id": "32",
+      "name": "32 hermes",
+      "url": "http://10.10.164.32:28789",
+      "type": "hermes_studio",
+      "enabled": true,
+      "profile": "default"
+    }
+  ],
+  "log_level": "info"
+}

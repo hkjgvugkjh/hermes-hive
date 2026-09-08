@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"os"
 	"sync"
+
+	"hermes-proxy/internal/di"
 )
 
 // AuthMethod defines the authentication method type.
@@ -46,16 +48,30 @@ type AuthConfig struct {
 	HTTPAPI *HTTPAPIAuth `json:"http_api,omitempty"`
 }
 
-// ServerConfig represents a single Hermes Studio server configuration.
+// ServerType identifies the protocol the proxy must speak with a backend.
+type ServerType string
+
+const (
+	// ServerTypeHermesStudio: proxy acts as the "小方盒" (MCU device) —
+	// performs mcu-login, opens Socket.IO /global-agent, translates DI
+	// events to/from Socket.IO events.
+	ServerTypeHermesStudio ServerType = "hermes_studio"
+	// ServerTypeGenericWS: backend implements the DI server side itself over
+	// a plain WebSocket; proxy relays DI frames transparently.
+	ServerTypeGenericWS ServerType = "generic_ws"
+)
+
+// ServerConfig represents a single backend server configuration.
 type ServerConfig struct {
-	ID       string `json:"id"`       // Unique identifier
-	Name     string `json:"name"`     // Display name
-	URL      string `json:"url"`      // http://host:port
-	Enabled  bool   `json:"enabled"`  // Whether this server is active
+	ID       string     `json:"id"`       // Unique identifier
+	Name     string     `json:"name"`     // Display name
+	URL      string     `json:"url"`      // http://host:port (or ws://host:port for generic_ws)
+	Type     ServerType `json:"type"`     // hermes_studio | generic_ws
+	Enabled  bool       `json:"enabled"`  // Whether this server is active
 	// Credentials for auto-login (optional)
 	Username string `json:"username,omitempty"`
 	Password string `json:"password,omitempty"`
-	// Profile to use (default: "default")
+	// Profile to use (default: "default"); used by hermes_studio adapter
 	Profile string `json:"profile"`
 }
 
@@ -67,6 +83,8 @@ type Config struct {
 	WSPath string `json:"ws_path"`
 	// Path for the admin API (e.g., /admin)
 	AdminPath string `json:"admin_path"`
+	// External host address for QR code generation
+	Host string `json:"host"`
 	// Auth configuration (required)
 	Auth AuthConfig `json:"auth"`
 	// Admin token for accessing the web UI and API
@@ -173,7 +191,27 @@ func (c *Config) DeleteServer(id string) bool {
 	return false
 }
 
-// Validate checks the configuration for errors.
+// GetServerPublicList returns servers with secrets stripped (for the client
+// over the encrypted WS channel — never leak passwords).
+func (c *Config) GetServerPublicList() []di.ServerInfo {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	out := make([]di.ServerInfo, 0, len(c.Servers))
+	for i := range c.Servers {
+		s := c.Servers[i]
+		t := string(s.Type)
+		if t == "" {
+			t = string(ServerTypeHermesStudio) // default assumption
+		}
+		out = append(out, di.ServerInfo{
+			ID:      s.ID,
+			Name:    s.Name,
+			Type:    t,
+			Enabled: s.Enabled,
+		})
+	}
+	return out
+}
 func (c *Config) Validate() error {
 	if c.Listen == "" {
 		return fmt.Errorf("listen address is required")
@@ -214,6 +252,9 @@ func (c *Config) Validate() error {
 		}
 		if s.URL == "" {
 			return fmt.Errorf("server[%d]: URL is required", i)
+		}
+		if s.Type != ServerTypeHermesStudio && s.Type != ServerTypeGenericWS {
+			return fmt.Errorf("server[%d] (%s): type must be 'hermes_studio' or 'generic_ws'", i, s.ID)
 		}
 	}
 	return nil

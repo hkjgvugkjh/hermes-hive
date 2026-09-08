@@ -7,6 +7,7 @@ const webUIHTML = `<!DOCTYPE html>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Hermes Proxy Admin</title>
+<script src="/qrcode.min.js"></script>
 <style>
 * { margin: 0; padding: 0; box-sizing: border-box; }
 body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #f5f5f5; color: #333; }
@@ -27,7 +28,10 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
 .btn-danger:hover { background: #c0392b; }
 .btn-success { background: #27ae60; color: white; }
 .btn-success:hover { background: #219a52; }
+.btn-secondary { background: #95a5a6; color: white; }
+.btn-secondary:hover { background: #7f8c8d; }
 .btn-sm { padding: 4px 10px; font-size: 12px; }
+.btn:disabled { opacity: 0.5; cursor: not-allowed; }
 .server-list { list-style: none; }
 .server-item { display: flex; align-items: center; padding: 12px; border: 1px solid #eee; border-radius: 6px; margin-bottom: 8px; }
 .server-item:hover { background: #f9f9f9; }
@@ -51,6 +55,9 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
 .toast-success { background: #27ae60; }
 .toast-error { background: #e74c3c; }
 @keyframes slideIn { from { transform: translateX(100%); opacity: 0; } to { transform: translateX(0); opacity: 1; } }
+.qr-container { display: flex; flex-direction: column; align-items: center; padding: 20px; margin-top: 16px; border-top: 1px solid #eee; }
+.qr-container canvas { border: 1px solid #ddd; border-radius: 8px; padding: 12px; }
+.qr-content { font-family: monospace; font-size: 12px; color: #666; margin-top: 12px; word-break: break-all; max-width: 400px; text-align: center; }
 </style>
 </head>
 <body>
@@ -58,6 +65,50 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
   <div class="header">
     <h1>Hermes Proxy Admin</h1>
     <p>管理 Hermes Studio 服务器清单和连接配置</p>
+  </div>
+
+  <!-- Proxy Settings Card -->
+  <div class="card">
+    <h2>代理对外配置</h2>
+    <div class="auth-section">
+      <div class="form-group">
+        <label>WebSocket 监听端口 *</label>
+        <input type="text" id="proxyListen" placeholder=":8649">
+      </div>
+      <div class="form-group">
+        <label>WebSocket 路径</label>
+        <input type="text" id="proxyWSPath" value="/ws" placeholder="/ws">
+      </div>
+      <div class="form-group">
+        <label>Admin 端口 *</label>
+        <input type="text" id="proxyAdminPort" placeholder=":8650">
+      </div>
+    </div>
+    <div class="auth-section">
+      <div class="form-group">
+        <label>连接 Token</label>
+        <input type="text" id="proxyToken" placeholder="客户端连接时使用的令牌">
+      </div>
+      <div class="form-group">
+        <label>Admin Token</label>
+        <input type="text" id="proxyAdminToken" placeholder="管理 API 访问令牌">
+      </div>
+      <div class="form-group">
+        <label>外部访问主机</label>
+        <input type="text" id="proxyHost" placeholder="10.10.164.90">
+      </div>
+    </div>
+    <div style="display: flex; gap: 10px; margin-top: 12px;">
+      <button class="btn btn-primary" id="btnValidate" onclick="validateConfig()">验证配置</button>
+      <button class="btn btn-success" id="btnSaveProxy" onclick="saveProxyConfig()" disabled>保存配置</button>
+    </div>
+    <div id="validateResult"></div>
+    <div id="qrSection" class="qr-container" style="display:none;">
+      <div id="qrcode"></div>
+      <div class="qr-content" id="qrContent"></div>
+      <button class="btn btn-secondary btn-sm" onclick="copyQRContent()" style="margin-top:8px;">复制内容</button>
+      <p style="font-size:12px;color:#888;margin-top:8px;">扫码配置 hermes-hive / hermes-reader</p>
+    </div>
   </div>
 
   <div class="card">
@@ -123,6 +174,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
 <script>
 let servers = [];
 let adminToken = localStorage.getItem('adminToken') || '';
+let qrCodeObj = null;
 
 async function api(path, opts = {}) {
   const headers = { 'Content-Type': 'application/json', ...(opts.headers || {}) };
@@ -147,9 +199,22 @@ async function loadServers() {
     const data = await api('/api/servers');
     servers = data.servers || [];
     renderServers();
+    loadProxySettings();
   } catch (e) {
     showToast(e.message, 'error');
   }
+}
+
+async function loadProxySettings() {
+  try {
+    const data = await api('/api/config');
+    if (data.listen) document.getElementById('proxyListen').value = data.listen;
+    if (data.ws_path) document.getElementById('proxyWSPath').value = data.ws_path;
+    if (data.admin_path) document.getElementById('proxyAdminPort').value = data.admin_path;
+    if (data.host) document.getElementById('proxyHost').value = data.host;
+    if (data.token) document.getElementById('proxyToken').value = data.token;
+    if (data.admin_token) document.getElementById('proxyAdminToken').value = data.admin_token;
+  } catch (e) {}
 }
 
 function renderServers() {
@@ -168,6 +233,93 @@ function renderServers() {
       '<button class="btn btn-danger btn-sm" onclick="deleteServer(\'' + s.id + '\')">删除</button>' +
     '</div>' +
   '</li>').join('');
+}
+
+async function validateConfig() {
+  const btn = document.getElementById('btnValidate');
+  btn.disabled = true;
+  btn.textContent = '验证中...';
+  
+  const resultDiv = document.getElementById('validateResult');
+  const qrSection = document.getElementById('qrSection');
+  qrSection.style.display = 'none';
+  
+  const req = {
+    listen: document.getElementById('proxyListen').value.trim(),
+    ws_path: document.getElementById('proxyWSPath').value.trim() || '/ws',
+    admin_port: document.getElementById('proxyAdminPort').value.trim(),
+    token: document.getElementById('proxyToken').value.trim(),
+    admin_token: document.getElementById('proxyAdminToken').value.trim(),
+    host: document.getElementById('proxyHost').value.trim()
+  };
+  
+  try {
+    const data = await api('/api/validate-config', {
+      method: 'POST',
+      body: JSON.stringify(req)
+    });
+    
+    if (data.valid) {
+      resultDiv.innerHTML = '<div class="test-result test-success">✓ 配置有效</div>';
+      document.getElementById('btnSaveProxy').disabled = false;
+      
+      // Show QR code
+      qrSection.style.display = 'flex';
+      const host = req.host || window.location.hostname;
+      const wsPort = req.listen.replace(/^:/, '');
+      const adminPort = req.admin_port.replace(/^:/, '');
+      const wsScheme = window.location.protocol === 'https:' ? 'wss' : 'ws';
+      const wsUrl = wsScheme + '://' + host + ':' + wsPort + req.ws_path;
+      const adminUrl = window.location.protocol + '//' + host + ':' + adminPort;
+      const token = req.token || '';
+      
+      const qrContent = 'hermes-proxy://' + wsUrl + '?token=' + encodeURIComponent(token) + '&admin=' + encodeURIComponent(adminUrl);
+      
+      // Clear previous QR
+      const qrDiv = document.getElementById('qrcode');
+      qrDiv.innerHTML = '';
+      if (qrCodeObj) qrCodeObj.clear();
+      qrCodeObj = new QRCode(qrDiv, { text: qrContent, width: 200, height: 200 });
+      
+      document.getElementById('qrContent').textContent = qrContent;
+    } else {
+      resultDiv.innerHTML = '<div class="test-result test-fail">✗ ' + (data.errors || ['验证失败']).join('; ') + '</div>';
+      document.getElementById('btnSaveProxy').disabled = true;
+    }
+  } catch (e) {
+    resultDiv.innerHTML = '<div class="test-result test-fail">验证失败: ' + e.message + '</div>';
+    document.getElementById('btnSaveProxy').disabled = true;
+  } finally {
+    btn.disabled = false;
+    btn.textContent = '验证配置';
+  }
+}
+
+async function saveProxyConfig() {
+  const req = {
+    listen: document.getElementById('proxyListen').value.trim(),
+    ws_path: document.getElementById('proxyWSPath').value.trim(),
+    admin_path: document.getElementById('proxyAdminPort').value.trim(),
+    host: document.getElementById('proxyHost').value.trim(),
+    auth: {
+      method: 'static_token',
+      static_token: { token: document.getElementById('proxyToken').value.trim() }
+    },
+    admin_token: document.getElementById('proxyAdminToken').value.trim()
+  };
+  
+  try {
+    await api('/api/config', { method: 'PUT', body: JSON.stringify(req) });
+    showToast('配置已保存', 'success');
+    document.getElementById('btnSaveProxy').disabled = true;
+  } catch (e) {
+    showToast('保存失败: ' + e.message, 'error');
+  }
+}
+
+function copyQRContent() {
+  const content = document.getElementById('qrContent').textContent;
+  navigator.clipboard.writeText(content).then(() => showToast('已复制', 'success'));
 }
 
 async function addServer() {
