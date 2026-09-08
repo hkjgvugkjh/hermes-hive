@@ -306,7 +306,7 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleValidateConfig validates proxy configuration parameters.
-// Note: ports already used by this running proxy are considered valid.
+// Note: connectivity and token tests are done by the browser (frontend).
 func (s *Server) handleValidateConfig(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		s.writeError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -338,15 +338,12 @@ func (s *Server) handleValidateConfig(w http.ResponseWriter, r *http.Request) {
 		currentAdminPort = p
 	}
 
-	// Validate listen port
-	if req.Listen == "" {
-		errors = append(errors, "WebSocket 监听端口不能为空")
-	} else {
+	// Validate listen port (optional - only validate if provided)
+	if req.Listen != "" {
 		port, err := strconv.Atoi(strings.TrimPrefix(req.Listen, ":"))
 		if err != nil || port < 1 || port > 65535 {
 			errors = append(errors, "WebSocket 监听端口无效（应为 1-65535）")
 		} else if port != currentListenPort {
-			// Only check availability if changing to a different port
 			ln, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
 			if err != nil {
 				errors = append(errors, fmt.Sprintf("端口 %d 已被其他程序占用", port))
@@ -354,18 +351,14 @@ func (s *Server) handleValidateConfig(w http.ResponseWriter, r *http.Request) {
 				ln.Close()
 			}
 		}
-		// If port == currentListenPort, it's our own proxy - OK
 	}
 
-	// Validate admin port
-	if req.AdminPort == "" {
-		errors = append(errors, "Admin 端口不能为空")
-	} else {
+	// Validate admin port (optional - only validate if provided)
+	if req.AdminPort != "" {
 		port, err := strconv.Atoi(strings.TrimPrefix(req.AdminPort, ":"))
 		if err != nil || port < 1 || port > 65535 {
 			errors = append(errors, "Admin 端口无效（应为 1-65535）")
 		} else if port != currentAdminPort {
-			// Only check availability if changing to a different port
 			ln, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
 			if err != nil {
 				errors = append(errors, fmt.Sprintf("端口 %d 已被其他程序占用", port))
@@ -373,10 +366,9 @@ func (s *Server) handleValidateConfig(w http.ResponseWriter, r *http.Request) {
 				ln.Close()
 			}
 		}
-		// If port == currentAdminPort, it's our own proxy - OK
 	}
 
-	// Validate WS path
+	// Validate WS path (optional)
 	if req.WSPath != "" && !strings.HasPrefix(req.WSPath, "/") {
 		errors = append(errors, "WebSocket 路径必须以 / 开头")
 	}

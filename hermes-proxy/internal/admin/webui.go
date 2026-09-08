@@ -253,6 +253,74 @@ async function validateConfig() {
     host: document.getElementById('proxyHost').value.trim()
   };
   
+  // If host is provided, test connectivity and token validity from browser
+  if (req.host) {
+    resultDiv.innerHTML = '<div class="test-result">正在测试连接...</div>';
+    
+    // Parse host to extract scheme, hostname, and port
+    let host = req.host;
+    let scheme = 'https';
+    let hostname = host;
+    
+    if (hostname.startsWith('https://')) {
+      scheme = 'https';
+      hostname = hostname.substring(8);
+    } else if (hostname.startsWith('http://')) {
+      scheme = 'http';
+      hostname = hostname.substring(7);
+    }
+    
+    // Extract port from host
+    let port = '';
+    const portIdx = hostname.indexOf(':');
+    if (portIdx !== -1) {
+      port = hostname.substring(portIdx + 1);
+      hostname = hostname.substring(0, portIdx);
+    }
+    
+    // Use admin_port if no port in host
+    const adminPort = port || req.admin_port.replace(/^:/, '') || '8650';
+    
+    // Build admin URL for testing
+    const adminURL = scheme + '://' + hostname + ':' + adminPort + '/api/config';
+    
+    try {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 10000);
+      
+      const resp = await fetch(adminURL, {
+        method: 'GET',
+        headers: {
+          'Authorization': 'Bearer ' + req.admin_token
+        },
+        signal: controller.signal,
+        mode: 'cors'
+      });
+      
+      clearTimeout(timeoutId);
+      
+      if (resp.status === 401) {
+        resultDiv.innerHTML = '<div class="test-result test-fail">✗ Token 无效（401 Unauthorized）</div>';
+        document.getElementById('btnSaveProxy').disabled = true;
+        btn.disabled = false;
+        btn.textContent = '验证配置';
+        return;
+      } else if (resp.status !== 200) {
+        resultDiv.innerHTML = '<div class="test-result test-fail">✗ 连接异常: HTTP ' + resp.status + '</div>';
+        document.getElementById('btnSaveProxy').disabled = true;
+        btn.disabled = false;
+        btn.textContent = '验证配置';
+        return;
+      }
+    } catch (e) {
+      resultDiv.innerHTML = '<div class="test-result test-fail">✗ 连接失败: ' + e.message + '</div>';
+      document.getElementById('btnSaveProxy').disabled = true;
+      btn.disabled = false;
+      btn.textContent = '验证配置';
+      return;
+    }
+  }
+  
   try {
     const data = await api('/api/validate-config', {
       method: 'POST',
@@ -265,12 +333,35 @@ async function validateConfig() {
       
       // Show QR code
       qrSection.style.display = 'flex';
-      const host = req.host || window.location.hostname;
-      const wsPort = req.listen.replace(/^:/, '');
-      const adminPort = req.admin_port.replace(/^:/, '');
-      const wsScheme = window.location.protocol === 'https:' ? 'wss' : 'ws';
-      const wsUrl = wsScheme + '://' + host + ':' + wsPort + req.ws_path;
-      const adminUrl = window.location.protocol + '//' + host + ':' + adminPort;
+      
+      // Parse host for QR code
+      let host = req.host || window.location.hostname;
+      let scheme = 'wss';
+      let hostname = host;
+      let port = '';
+      
+      // Extract scheme
+      if (hostname.startsWith('https://')) {
+        scheme = 'wss';
+        hostname = hostname.substring(8);
+      } else if (hostname.startsWith('http://')) {
+        scheme = 'ws';
+        hostname = hostname.substring(7);
+      }
+      
+      // Extract port from host
+      const portIdx = hostname.indexOf(':');
+      if (portIdx !== -1) {
+        port = hostname.substring(portIdx + 1);
+        hostname = hostname.substring(0, portIdx);
+      }
+      
+      // Use listen port if no port in host
+      const wsPort = port || req.listen.replace(/^:/, '') || '8649';
+      const adminPort = port || req.admin_port.replace(/^:/, '') || '8650';
+      
+      const wsUrl = scheme + '://' + hostname + ':' + wsPort + req.ws_path;
+      const adminUrl = (scheme === 'wss' ? 'https://' : 'http://') + hostname + ':' + adminPort;
       const token = req.token || '';
       
       const qrContent = 'hermes-proxy://' + wsUrl + '?token=' + encodeURIComponent(token) + '&admin=' + encodeURIComponent(adminUrl);

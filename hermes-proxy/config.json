@@ -2,7 +2,7 @@
   "listen": ":8649",
   "ws_path": "/ws",
   "admin_path": ":8650",
-  "host": "hermes-proxy.willam.eu.org",
+  "host": "https://hermes-proxy.willam.eu.org",
   "auth": {
     "method": "static_token",
     "static_token": {
