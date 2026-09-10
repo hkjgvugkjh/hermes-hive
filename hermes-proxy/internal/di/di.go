@@ -38,6 +38,8 @@ const (
 	TypeDIEvent        MessageType = 0x3B // both: opaque 小方盒 event passthrough
 	TypeDIPing         MessageType = 0x3C // both: app-level heartbeat
 	TypeDIPong         MessageType = 0x3D // both: heartbeat reply
+	TypeDIError        MessageType = 0x3F // S->C: server-scoped error
+
 )
 
 // Frame is the DI wire format: [1 type][4 length][payload].
@@ -88,6 +90,10 @@ type DIConnectPayload struct {
 	// Optional per-connection credentials; override ServerConfig creds.
 	Username string `json:"username,omitempty"`
 	Password string `json:"password,omitempty"`
+	// Optional device code (e.g. AE30BED4) for studio adapter identity.
+	DeviceCode string `json:"device_code,omitempty"`
+	// Optional full MAC (e.g. 4C11AE30BED4) for Socket.IO instanceId.
+	InstanceId string `json:"instance_id,omitempty"`
 }
 
 // DIConnectAckPayload reports connect result.
@@ -127,6 +133,19 @@ type DISessionUpdatePayload struct {
 	ServerID string    `json:"server_id"`
 	Full     bool      `json:"full"` // true = full snapshot, false = incremental diff
 	Sessions []Session `json:"sessions"`
+}
+
+// DISessionPollPayload requests a session snapshot.
+// ServerID may name a specific backend; empty means "the focused one".
+type DISessionPollPayload struct {
+	ServerID string `json:"server_id,omitempty"`
+}
+
+// DIErrorPayload reports a server-scoped failure so the client can surface it
+// instead of waiting for a response that will never arrive.
+type DIErrorPayload struct {
+	ServerID string `json:"server_id,omitempty"`
+	Message  string `json:"message"`
 }
 
 // DISwitchServerPayload switches the active server (single WS stays open).

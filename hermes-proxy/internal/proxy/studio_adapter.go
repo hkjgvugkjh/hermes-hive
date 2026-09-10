@@ -27,12 +27,13 @@ type studioAdapter struct {
 	cfg      *config.ServerConfig
 	user     string
 	pass     string
-	client   *Client // the hive client we push DI frames to
+	conn     *backendConn // shared backend; events fan out to its subscribers
 
 	mu       sync.Mutex
 	ws       *websocket.Conn
 	sid      string
 	deviceID string // assigned by server after mcu.ready
+	instanceID string // full MAC for Socket.IO handshake
 	jwt      string
 
 	done chan struct{}
@@ -40,15 +41,16 @@ type studioAdapter struct {
 }
 
 // newStudioAdapter constructs the adapter.
-func newStudioAdapter(p *Server, cfg *config.ServerConfig, user, pass string, client *Client) *studioAdapter {
+func newStudioAdapter(p *Server, cfg *config.ServerConfig, user, pass string, conn *backendConn) *studioAdapter {
 	return &studioAdapter{
-		proxy:    p,
-		cfg:      cfg,
-		user:     user,
-		pass:     pass,
-		client:   client,
-		deviceID: "PROXY-" + shortID(),
-		done:     make(chan struct{}),
+		proxy:      p,
+		cfg:        cfg,
+		user:       user,
+		pass:       pass,
+		conn:       conn,
+		deviceID:   "PROXY-" + shortID(),
+		instanceID: strings.ToUpper("PROXY-" + shortID()),
+		done:       make(chan struct{}),
 	}
 }
 
@@ -69,8 +71,8 @@ func (a *studioAdapter) Connect() error {
 // mcuLogin obtains a JWT from the backend (小方盒 login flow).
 func (a *studioAdapter) mcuLogin() (string, error) {
 	body := map[string]interface{}{
-		"token":        strings.ToUpper(a.deviceID),
-		"id":           strings.ToUpper(a.deviceID),
+		"token":        strings.ToUpper(a.instanceID),
+		"id":           strings.ToUpper(a.instanceID),
 		"device_code":  strings.ToUpper(a.deviceID),
 		"device_type":  "hermes-proxy",
 		"source":       "global_agent",
@@ -81,7 +83,7 @@ func (a *studioAdapter) mcuLogin() (string, error) {
 	b, _ := json.Marshal(body)
 	req, _ := http.NewRequest(http.MethodPost, a.cfg.URL+"/api/auth/mcu-login", strings.NewReader(string(b)))
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-Hermes-Device-Id", strings.ToUpper(a.deviceID))
+	req.Header.Set("X-Hermes-Device-Id", strings.ToUpper(a.instanceID))
 	req.Header.Set("X-Hermes-Device-Name", "Hermes Proxy")
 
 	hc := &http.Client{Timeout: 15 * time.Second}
@@ -106,7 +108,7 @@ func (a *studioAdapter) mcuLogin() (string, error) {
 	return out.Token, nil
 }
 
-// openSocketIO runs the Engine.IO/Socket.IO handshake and the read loop.
+// openSocketIO runs the Engine.IO/Socket.IO handshake and read loop.
 func (a *studioAdapter) openSocketIO() error {
 	u, err := url.Parse(a.cfg.URL)
 	if err != nil {
@@ -127,7 +129,10 @@ func (a *studioAdapter) openSocketIO() error {
 	u.RawQuery = q.Encode()
 
 	dialer := websocket.Dialer{HandshakeTimeout: 15 * time.Second}
-	ws, _, err := dialer.Dial(u.String(), nil)
+	headers := http.Header{}
+	headers.Set("X-Hermes-Device-Id", strings.ToUpper(a.deviceID))
+	headers.Set("X-Hermes-Device-Name", "Hermes Proxy")
+	ws, _, err := dialer.Dial(u.String(), headers)
 	if err != nil {
 		return err
 	}
@@ -142,6 +147,7 @@ func (a *studioAdapter) openSocketIO() error {
 	if err := a.waitOpenAndConnect(); err != nil {
 		return err
 	}
+	log.Printf("[studio] connected: deviceID=%s instanceID=%s", a.deviceID, a.instanceID)
 	return nil
 }
 
@@ -164,20 +170,43 @@ func (a *studioAdapter) waitOpenAndConnect() error {
 		}
 	}
 
-	// Namespace CONNECT.
+	// Namespace CONNECT: deviceCode=AE30BED4, instanceId=4C11AE30BED4
 	connect := fmt.Sprintf(`40/global-agent,{"token":%q,"deviceCode":%q,"device_code":%q,"role":"hermes-studio","instanceId":%q,"profile":%q}`,
-		a.jwt, strings.ToUpper(a.deviceID), strings.ToUpper(a.deviceID), strings.ToUpper(a.deviceID), a.profile())
+		a.jwt, strings.ToUpper(a.deviceID), strings.ToUpper(a.deviceID), strings.ToUpper(a.instanceID), a.profile())
 	if err := a.writeRaw(connect); err != nil {
 		return err
 	}
+	// Small delay to let server process CONNECT before mcu.ready
+	time.Sleep(100 * time.Millisecond)
 
-	// mcu.ready
+	// mcu.ready: id and active_device = full MAC (4C11AE30BED4)
 	ready := fmt.Sprintf(`42/global-agent,["mcu.ready",{"apiToken":%q,"type":"mcu.ready","id":%q,"active_device":%q,"profile":%q,"capabilities":{"display":true,"audio_queue":true,"audio_playback":true,"pcm_stream":false}}]`,
-		a.jwt, strings.ToUpper(a.deviceID), strings.ToUpper(a.deviceID), a.profile())
+		a.jwt, strings.ToUpper(a.instanceID), strings.ToUpper(a.instanceID), a.profile())
 	if err := a.writeRaw(ready); err != nil {
 		return err
 	}
+	
+	// Start periodic mcu.ready heartbeat to keep connection alive
+	go a.heartbeatLoop()
 	return nil
+}
+
+// heartbeatLoop sends periodic mcu.status to keep connection alive
+func (a *studioAdapter) heartbeatLoop() {
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-a.done:
+			return
+		case <-ticker.C:
+			status := fmt.Sprintf(`42/global-agent,["mcu.status",{"id":%q,"active_device":%q,"profile":%q,"status":"ready"}]`,
+				strings.ToUpper(a.instanceID), strings.ToUpper(a.instanceID), a.profile())
+			if err := a.writeRaw(status); err != nil {
+				return
+			}
+		}
+	}
 }
 
 func (a *studioAdapter) profile() string {
@@ -271,12 +300,12 @@ func (a *studioAdapter) dispatchEvent(name string, data json.RawMessage) {
 		if name == "auth.invalid" {
 			prompt = "Authentication invalid, please re-authenticate"
 		}
-		a.proxy.sendDIFrame(a.client, di.TypeDIAuthReq, di.DIAuthReqPayload{
+		a.proxy.broadcastDI(a.conn, di.TypeDIAuthReq, di.DIAuthReqPayload{
 			Prompt: prompt,
 		})
 	case "mcu.interaction.status", "mcu.audio.enqueue", "mcu.session.clear":
 		// Pass through as opaque DI events (down direction).
-		a.proxy.sendDIFrame(a.client, di.TypeDIEvent, diEvent{
+		a.proxy.broadcastDI(a.conn, di.TypeDIEvent, diEvent{
 			Direction: "down",
 			Event:     name,
 			Data:      string(data),
@@ -284,7 +313,7 @@ func (a *studioAdapter) dispatchEvent(name string, data json.RawMessage) {
 	default:
 		// Everything else: forward as a generic DI event so the client can
 		// react (e.g. session updates, custom events).
-		a.proxy.sendDIFrame(a.client, di.TypeDIEvent, diEvent{
+		a.proxy.broadcastDI(a.conn, di.TypeDIEvent, diEvent{
 			Direction: "down",
 			Event:     name,
 			Data:      string(data),

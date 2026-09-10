@@ -5,6 +5,7 @@ import '../providers/global_config_provider.dart';
 import '../models/global_config.dart';
 import '../l10n/app_localizations.dart';
 import '../providers/locale_provider.dart';
+import 'package:hermes_shared/hermes_shared.dart';
 
 /// Screen for configuring global connection mode
 class GlobalConfigScreen extends StatefulWidget {
@@ -54,6 +55,11 @@ class _GlobalConfigScreenState extends State<GlobalConfigScreen> {
       appBar: AppBar(
         title: Text(AppLocalizations.of(context).globalConfiguration),
         actions: [
+          IconButton(
+            onPressed: _scanQR,
+            icon: const Icon(Icons.qr_code_scanner),
+            tooltip: '扫码配置',
+          ),
           TextButton.icon(
             onPressed: _isTesting ? null : _testProxyConnection,
             icon: _isTesting
@@ -338,6 +344,33 @@ class _GlobalConfigScreenState extends State<GlobalConfigScreen> {
       case ConnectionMode.standalone:
         return AppLocalizations.of(context).standaloneModeInfo;
     }
+  }
+
+  Future<void> _scanQR() async {
+    final raw = await Navigator.push<String>(
+      context,
+      MaterialPageRoute(builder: (_) => const QRScannerPage()),
+    );
+    if (raw == null || !mounted) return;
+
+    final config = QRConfigParser.parse(raw);
+    if (config == null) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('无效的二维码')),
+      );
+      return;
+    }
+
+    // Convert wss:// ws url to https:// admin url for the proxy URL field
+    final wsUrl = config['ws_url'] ?? '';
+    final uri = Uri.parse(wsUrl);
+    final proxyUrl = '${uri.scheme == 'wss' ? 'https' : 'http'}://${uri.host}${uri.hasPort ? ':${uri.port}' : ''}';
+    
+    setState(() {
+      _mode = ConnectionMode.hermesProxy;
+      _proxyUrlController.text = proxyUrl;
+      _proxyAuthTokenController.text = config['token'] ?? '';
+    });
   }
 
   Future<void> _testProxyConnection() async {

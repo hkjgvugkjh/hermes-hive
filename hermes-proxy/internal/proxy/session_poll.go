@@ -9,22 +9,21 @@ import (
 	"hermes-proxy/internal/di"
 )
 
-// pollSessions runs the session-state poller for a connected hermes_studio
-// backend. Per design, the proxy is responsible for producing session updates
-// even when the backend does not push them. We poll /api/sessions periodically
-// and diff against the last snapshot, pushing only the changes.
-func (s *Server) pollSessions(client *Client, ab *activeBackend) {
+// pollBackend runs the session-state poller for one shared hermes_studio
+// backend. There is exactly one poller per backend no matter how many clients
+// are subscribed; its diffs are fanned out by broadcastDI.
+func (s *Server) pollBackend(bc *backendConn) {
 	ticker := time.NewTicker(sessionPollInterval)
 	defer ticker.Stop()
 	var last map[string]di.Session
 	for {
 		select {
-		case <-ab.pollStop:
+		case <-bc.pollStop:
 			return
 		case <-ticker.C:
-			snapshot, err := s.fetchSessionSnapshot(ab)
+			snapshot, err := s.fetchSessionSnapshot(bc)
 			if err != nil {
-				log.Printf("[di][poll] fetch sessions for %s failed: %v", ab.cfg.ID, err)
+				log.Printf("[di][poll] fetch sessions for %s failed: %v", bc.id, err)
 				continue
 			}
 			diff := diffSessions(last, snapshot)
@@ -32,8 +31,8 @@ func (s *Server) pollSessions(client *Client, ab *activeBackend) {
 				continue
 			}
 			last = snapshot
-			s.sendDIFrame(client, di.TypeDISessionUpdate, di.DISessionUpdatePayload{
-				ServerID: ab.cfg.ID,
+			s.broadcastDI(bc, di.TypeDISessionUpdate, di.DISessionUpdatePayload{
+				ServerID: bc.id,
 				Full:     false,
 				Sessions: diff,
 			})
@@ -41,36 +40,65 @@ func (s *Server) pollSessions(client *Client, ab *activeBackend) {
 	}
 }
 
-// pushSessionSnapshot sends the full current snapshot (used on explicit poll
-// request or server switch).
-func (s *Server) pushSessionSnapshot(client *Client, ab *activeBackend, full bool) {
-	snap, err := s.fetchSessionSnapshot(ab)
+// pushSessionSnapshot sends the current snapshot to all subscribers of bc
+// (used on connect and on explicit poll).
+func (s *Server) pushSessionSnapshot(bc *backendConn, full bool) {
+	snapshot, err := s.fetchSessionSnapshot(bc)
 	if err != nil {
+		log.Printf("[di] snapshot for %s failed: %v", bc.id, err)
+		s.broadcastDI(bc, di.TypeDIError, di.DIErrorPayload{
+			ServerID: bc.id, Message: err.Error(),
+		})
+		return
+	}
+	s.broadcastDI(bc, di.TypeDISessionUpdate, di.DISessionUpdatePayload{
+		ServerID: bc.id,
+		Full:     full,
+		Sessions: snapshotToList(snapshot),
+	})
+}
+
+// clientSnapshot sends a snapshot to one client only (used right after that
+// client attaches, so it does not have to wait for the next poll tick).
+func (s *Server) clientSnapshot(client *Client, bc *backendConn, full bool) {
+	snapshot, err := s.fetchSessionSnapshot(bc)
+	if err != nil {
+		s.sendDIFrame(client, di.TypeDIError, di.DIErrorPayload{
+			ServerID: bc.id, Message: err.Error(),
+		})
 		return
 	}
 	s.sendDIFrame(client, di.TypeDISessionUpdate, di.DISessionUpdatePayload{
-		ServerID: ab.cfg.ID,
+		ServerID: bc.id,
 		Full:     full,
-		Sessions: snapshotToList(snap),
+		Sessions: snapshotToList(snapshot),
 	})
 }
 
 // fetchSessionSnapshot pulls the session list from a hermes_studio backend.
-// It uses the JWT obtained during mcu-login (stored on the activeBackend) when
-// available; otherwise falls back to basic auth from configured credentials.
-func (s *Server) fetchSessionSnapshot(ab *activeBackend) (map[string]di.Session, error) {
-	url := ab.cfg.URL + "/api/hermes/sessions"
-	if ab.cfg.Profile != "" {
-		url += "?profile=" + ab.cfg.Profile
+// It uses the JWT obtained during mcu-login when available; otherwise falls
+// back to basic auth from configured credentials.
+func (s *Server) fetchSessionSnapshot(bc *backendConn) (map[string]di.Session, error) {
+	bc.mu.Lock()
+	cfg := bc.cfg
+	jwt := bc.jwt
+	bc.mu.Unlock()
+	if cfg == nil {
+		return nil, errHTTPStatus(0)
+	}
+
+	url := cfg.URL + "/api/hermes/sessions"
+	if cfg.Profile != "" {
+		url += "?profile=" + cfg.Profile
 	}
 	req, err := http.NewRequest(http.MethodGet, url, nil)
 	if err != nil {
 		return nil, err
 	}
-	if ab.jwt != "" {
-		req.Header.Set("Authorization", "Bearer "+ab.jwt)
-	} else if ab.cfg.Username != "" {
-		req.SetBasicAuth(ab.cfg.Username, ab.cfg.Password)
+	if jwt != "" {
+		req.Header.Set("Authorization", "Bearer "+jwt)
+	} else if cfg.Username != "" {
+		req.SetBasicAuth(cfg.Username, cfg.Password)
 	}
 	client := &http.Client{Timeout: 10 * time.Second}
 	resp, err := client.Do(req)
@@ -97,7 +125,7 @@ func (s *Server) fetchSessionSnapshot(ab *activeBackend) (map[string]di.Session,
 			ID:         ss.ID,
 			Title:      ss.Title,
 			LastActive: ss.LastActive,
-			ServerID:   ab.cfg.ID,
+			ServerID:   bc.id,
 		}
 	}
 	return out, nil
@@ -113,9 +141,9 @@ func diffSessions(prev, cur map[string]di.Session) []di.Session {
 			out = append(out, cs)
 		}
 	}
-	for id := range prev {
+	for id, ps := range prev {
 		if _, ok := cur[id]; !ok {
-			out = append(out, di.Session{ID: id, Status: "gone", ServerID: cur[id].ServerID})
+			out = append(out, di.Session{ID: id, Status: "gone", ServerID: ps.ServerID})
 		}
 	}
 	return out

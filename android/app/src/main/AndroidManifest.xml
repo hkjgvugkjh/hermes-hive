@@ -1,6 +1,16 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- hermes-reader permissions.
+         Deliberately absent: READ/WRITE_EXTERNAL_STORAGE. Downloaded books
+         live in the app's private directory so no storage permission is
+         needed and nothing escapes the sandbox on uninstall. -->
+    <uses-permission android:name="android.permission.INTERNET"/>
+    <uses-permission android:name="android.permission.RECORD_AUDIO"/>
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
+    <!-- Wake lock lets narration continue with the screen off. -->
+    <uses-permission android:name="android.permission.WAKE_LOCK"/>
     <application
-        android:label="hermes_hive"
+        android:label="Hermes Hive"
         android:name="${applicationName}"
         android:icon="@mipmap/ic_launcher">
         <activity

@@ -29,6 +29,9 @@ type Server struct {
 	clients   map[string]*Client // clientID -> client
 	mu        sync.RWMutex
 	transport *http.Transport
+
+	// hub owns backend connections shared by all clients.
+	hub *backendHub
 }
 
 // Client represents a connected hermes-hive client.
@@ -42,9 +45,12 @@ type Client struct {
 	pending        map[string]chan *protocol.HTTPResponsePayload
 	pendingCounter uint64
 
-	// DI control-plane state
-	active       *activeBackend // current connected backend (DI)
-	voiceSession string         // session_id targeted by an in-progress voice cmd
+	// DI control-plane state.
+	// A client may hold subscriptions to several backends at once; `current`
+	// is the one that drives voice/auth/event traffic.
+	current      string // serverID of the focused backend
+	subscribed   map[string]struct{}
+	voiceSession string // session_id targeted by an in-progress voice cmd
 }
 
 // wsFrameBinary is the websocket message type used for DI/control frames.
@@ -65,7 +71,7 @@ var diTypes = map[protocol.MessageType]bool{
 
 // NewServer creates a new proxy server.
 func NewServer(cfg *config.Config) *Server {
-	return &Server{
+	s := &Server{
 		cfg:       cfg,
 		validator: auth.NewValidator(&cfg.Auth),
 		upgrader: websocket.Upgrader{
@@ -83,6 +89,8 @@ func NewServer(cfg *config.Config) *Server {
 			TLSClientConfig:     &tls.Config{InsecureSkipVerify: true},
 		},
 	}
+	s.hub = newBackendHub(s)
+	return s
 }
 
 // Run starts the HTTP server and WebSocket endpoint.
@@ -397,6 +405,36 @@ func (s *Server) sendError(client *Client, code int, msg string) {
 		Body:       []byte(fmt.Sprintf(`{"error":%q}`, msg)),
 	}
 	s.sendHTTPResponse(client, resp)
+}
+
+// broadcastDI encrypts and writes a DI frame to every client subscribed to bc.
+//
+// This is the "dispatch" half of the client/dispatch/service model: a backend
+// connection produces one event and the proxy fans it out to all clients that
+// are currently attached to that backend.
+func (s *Server) broadcastDI(bc *backendConn, mt di.MessageType, payload interface{}) {
+	if bc == nil {
+		return
+	}
+	plain, err := di.EncodePayload(payload)
+	if err != nil {
+		log.Printf("[di] encode error: %v", err)
+		return
+	}
+	for _, c := range bc.subscribers() {
+		enc, err := crypto.Encrypt(c.SharedKey, plain)
+		if err != nil {
+			log.Printf("[di] encrypt error: %v", err)
+			continue
+		}
+		frame := di.EncodeFrame(&di.Frame{Type: mt, Payload: enc})
+		c.mu.Lock()
+		err = c.Conn.WriteMessage(wsFrameBinary, frame)
+		c.mu.Unlock()
+		if err != nil {
+			log.Printf("[di] write error to %s: %v", c.ID, err)
+		}
+	}
 }
 
 // Broadcast sends a message to all connected clients (for future use).

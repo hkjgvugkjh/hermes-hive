@@ -43,3 +43,6 @@ app.*.map.json
 /android/app/debug
 /android/app/profile
 /android/app/release
+hermes-proxy/hermes-proxy-final
+hermes-proxy/hermes-proxy-*.bak
+hermes-proxy/hubverify

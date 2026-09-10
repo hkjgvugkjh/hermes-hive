@@ -20,6 +20,8 @@ dependencies:
   intl: ^0.20.2
   cryptography: ^2.7.0
   web_socket_channel: ^3.0.1
+  hermes_shared:
+    path: ../hermes-shared
 
 dev_dependencies:
   flutter_test:

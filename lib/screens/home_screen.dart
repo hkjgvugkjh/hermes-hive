@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../providers/server_provider.dart';
@@ -14,6 +16,7 @@ import 'dashboard_screen.dart';
 import 'sessions_tab.dart';
 import 'files_tab.dart';
 import 'terminal_tab.dart';
+
 
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
@@ -386,6 +389,10 @@ class _HomeScreenState extends State<HomeScreen> with SingleTickerProviderStateM
     Navigator.push(context, MaterialPageRoute(builder: (_) => const GlobalConfigScreen()));
   }
 
+  /// Opens the bookshelf for the currently active server.
+  ///
+  /// Picks the transport to match the global connection mode: through
+  /// hermes-proxy when that mode is active, direct HTTP otherwise.
   void _confirmDeleteServer(BuildContext context, ServerConfig server) {
     showDialog(
       context: context,
