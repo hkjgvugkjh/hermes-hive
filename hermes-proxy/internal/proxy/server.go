@@ -10,6 +10,7 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"strings"
 	"sync"
 	"time"
 
@@ -101,6 +102,11 @@ func (s *Server) Run() error {
 
 	log.Printf("[proxy] Listening on %s, WS path: %s", s.cfg.Listen, s.cfg.WSPath)
 	log.Printf("[proxy] Auth method: %s", s.cfg.Auth.Method)
+
+	// Service layer: warm up every enabled backend so the first client attach
+	// is served by a live connection instead of paying for mcu-login itself.
+	go s.hub.preconnect()
+
 	return http.ListenAndServe(s.cfg.Listen, mux)
 }
 
@@ -312,16 +318,28 @@ func (s *Server) handleHTTPRequest(client *Client, encryptedPayload []byte) {
 }
 
 // forwardRequest forwards the HTTP request to the target Hermes Studio server.
+//
+// Endpoints under /api/studio/files/* (and several others) require a Bearer
+// <REDACTED>, but the reader's FileTransport does not carry one. To keep the
+// client side simple, the proxy attaches the JWT it obtained during its own
+// mcu-login handshake with the backend. A client-supplied Authorization header
+// always wins, so callers can still override.
 func (s *Server) forwardRequest(serverCfg *config.ServerConfig, req *protocol.HTTPRequestPayload) (*protocol.HTTPResponsePayload, error) {
 	target, err := url.Parse(serverCfg.URL)
 	if err != nil {
 		return nil, fmt.Errorf("invalid server URL: %w", err)
 	}
 
-	// Build the request URL
-	reqURL := target.ResolveReference(&url.URL{Path: req.Path})
-
-	// Create HTTP request
+	// Build the request URL. The path may include a query string (e.g.
+	// "/api/studio/files/list?path=%2F"), so split it off before resolving —
+	// ResolveReference would otherwise escape the "?" and the backend 404s.
+	path, query := req.Path, ""
+	if idx := strings.Index(req.Path, "?"); idx >= 0 {
+		path = req.Path[:idx]
+		query = req.Path[idx+1:]
+	}
+	reqURL := target.ResolveReference(&url.URL{Path: path})
+	reqURL.RawQuery = query
 	var bodyReader io.Reader
 	if req.Body != nil {
 		bodyReader = bytes.NewReader(req.Body)
@@ -334,6 +352,15 @@ func (s *Server) forwardRequest(serverCfg *config.ServerConfig, req *protocol.HT
 	// Set headers
 	for k, v := range req.Headers {
 		httpReq.Header.Set(k, v)
+	}
+
+	// Attach the proxy's own JWT if the client did not supply one. This is what
+	// makes unauthenticated FileTransport calls succeed against endpoints that
+	// otherwise demand auth (e.g. /api/studio/files/list).
+	if httpReq.Header.Get("Authorization") == "" {
+		if jwt := s.backendJWT(serverCfg.ID); jwt != "" {
+			httpReq.Header.Set("Authorization", "Bearer "+jwt)
+		}
 	}
 
 	// Execute
@@ -366,6 +393,18 @@ func (s *Server) forwardRequest(serverCfg *config.ServerConfig, req *protocol.HT
 		Headers:    respHeaders,
 		Body:       respBody,
 	}, nil
+}
+
+// backendJWT returns the proxy's JWT for serverID (obtained during mcu-login).
+// Empty string if the backend is not connected yet.
+func (s *Server) backendJWT(serverID string) string {
+	bc := s.hub.get(serverID)
+	if bc == nil {
+		return ""
+	}
+	bc.mu.Lock()
+	defer bc.mu.Unlock()
+	return bc.jwt
 }
 
 // sendHTTPResponse encrypts and sends an HTTP response.

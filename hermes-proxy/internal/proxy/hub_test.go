@@ -1,13 +1,15 @@
 package proxy
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"sync"
 	"testing"
 	"time"
 
 	"hermes-proxy/internal/config"
+	"hermes-proxy/internal/protocol"
 )
-
 // newTestServer builds a Server with a hub and a couple of enabled backends.
 func newHubTestServer() *Server {
 	cfg := &config.Config{
@@ -259,5 +261,33 @@ func TestConcurrentFirstAttachDialsOnce(t *testing.T) {
 	}
 	if got := len(first.subscribers()); got != n {
 		t.Fatalf("expected %d subscribers on the shared conn, got %d", n, got)
+	}
+}
+
+// TestForwardRequestAttachesJWT verifies that forwardRequest attaches the
+// proxy's own JWT when the client does not supply one.
+func TestForwardRequestAttachesJWT(t *testing.T) {
+	var gotAuth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotAuth = r.Header.Get("Authorization")
+		w.WriteHeader(200)
+		w.Write([]byte(`{"entries":[]}`))
+	}))
+	defer srv.Close()
+
+	s := newHubTestServer()
+	// inject a fake backendConn with a JWT
+	bc := &backendConn{id: "s1", cfg: &config.ServerConfig{ID: "s1", URL: srv.URL, Type: config.ServerTypeHermesStudio}, jwt: "test-jwt-xyz"}
+	s.hub.conns["s1"] = bc
+
+	resp, err := s.forwardRequest(&config.ServerConfig{ID: "s1", URL: srv.URL}, &protocol.HTTPRequestPayload{Path: "/api/studio/files/list"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != 200 {
+		t.Fatalf("status %d", resp.StatusCode)
+	}
+	if gotAuth != "Bearer test-jwt-xyz" {
+		t.Fatalf("expected Bearer <REDACTED> got %q", gotAuth)
 	}
 }

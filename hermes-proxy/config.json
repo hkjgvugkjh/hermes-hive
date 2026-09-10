@@ -2,7 +2,6 @@
   "listen": ":8649",
   "ws_path": "/ws",
   "admin_path": ":8650",
-  "host": "https://hermes-proxy.willam.eu.org",
   "auth": {
     "method": "static_token",
     "static_token": {
@@ -27,6 +26,8 @@
       "url": "http://10.10.164.77:8648",
       "type": "hermes_studio",
       "enabled": true,
+      "username": "admin",
+      "password": "123456",
       "profile": "default"
     },
     {
@@ -35,6 +36,8 @@
       "url": "http://10.10.164.32:28789",
       "type": "hermes_studio",
       "enabled": true,
+      "username": "admin",
+      "password": "123456",
       "profile": "default"
     }
   ],

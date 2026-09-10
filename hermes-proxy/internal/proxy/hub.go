@@ -87,7 +87,11 @@ func (h *backendHub) acquire(sc *config.ServerConfig, client *Client, creds diCr
 	}
 	// Subscribe before releasing the hub lock so a concurrent release cannot
 	// tear the conn down while we are still attaching.
-	bc.subscribe(client)
+	// A nil client means a service-layer warm-up (preconnect); nobody is
+	// attached yet, so there is nothing to subscribe.
+	if client != nil {
+		bc.subscribe(client)
+	}
 	h.mu.Unlock()
 
 	if bc.isReady() {
@@ -160,6 +164,61 @@ func (h *backendHub) dial(bc *backendConn, creds diCreds) error {
 	bc.mu.Unlock()
 	log.Printf("[hub] backend %s ready (generic_ws relay)", bc.id)
 	return nil
+}
+
+// preconnect dials every enabled backend at start-up so that a client's
+// first attach is served by an already-warm connection.
+//
+// Under the client/dispatch/service model the backend is owned by the service
+// layer, not by any client, so warming them at boot is legitimate and removes
+// the "first client waits for mcu-login" latency. Failures are logged and
+// retried in the background; they never block start-up.
+func (h *backendHub) preconnect() {
+	for i := range h.server.cfg.GetServers() {
+		sc := &h.server.cfg.Servers[i]
+		if !sc.Enabled {
+			continue
+		}
+		go func(sc *config.ServerConfig) {
+			creds := diCreds{user: sc.Username, pass: sc.Password}
+			bc, err := h.acquire(sc, nil, creds)
+			if err != nil {
+				log.Printf("[hub] preconnect %s failed: %v (will retry)", sc.ID, err)
+				go h.retryLoop(sc)
+				return
+			}
+			log.Printf("[hub] preconnect %s ok (device=%s)", sc.ID, bc.deviceID)
+		}(sc)
+	}
+}
+
+// retryLoop re-dials a backend that failed to come up, with capped exponential
+// backoff, until it succeeds or the backend is already healthy.
+func (h *backendHub) retryLoop(sc *config.ServerConfig) {
+	const (
+		initial = 5 * time.Second
+		maxWait = 5 * time.Minute
+	)
+	wait := initial
+	for {
+		time.Sleep(wait)
+		if bc := h.get(sc.ID); bc != nil && bc.isReady() {
+			return
+		}
+		creds := diCreds{user: sc.Username, pass: sc.Password}
+		bc, err := h.acquire(sc, nil, creds)
+		if err == nil {
+			log.Printf("[hub] backend %s recovered (device=%s)", sc.ID, bc.deviceID)
+			return
+		}
+		log.Printf("[hub] retry %s failed: %v (next in %s)", sc.ID, err, wait)
+		if wait < maxWait {
+			wait *= 2
+			if wait > maxWait {
+				wait = maxWait
+			}
+		}
+	}
 }
 
 // release removes a client's subscription. When the last subscriber leaves the

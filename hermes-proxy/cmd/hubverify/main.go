@@ -1,13 +1,11 @@
-// cmd/hubverify — 端到端验证 client/dispatch/service 共享模型。
+// cmd/hubverify — end-to-end verification of the client/dispatch/service model.
 //
-// 连 N 个 WebSocket 客户端到同一个 proxy，全部 attach 到同一台服务器。
-// 断言：
-//   1. 每个客户端都收到 ConnectAck(OK) 与会话快照
-//   2. 后端只拨号一次（proxy 日志 "[hub] backend X ready" 只出现 1 次）
-//   3. 客户端 A 断开后，剩余客户端仍能收到后续会话更新（广播）
-//
-// 用法：PROXY_WS=ws://127.0.0.1:8649/ws?token=XXX PROXY_TOKEN=XXX \
-//       SERVER_ID=185 go run ./cmd/hubverify
+// Connects N WebSocket clients to the same proxy, all attaching to one server.
+// Verifies:
+//   1. Every client gets ConnectAck(OK) and a session snapshot
+//   2. The backend is dialled exactly once
+//   3. When client A drops, the rest still get updates (fan-out)
+//   4. An HTTP request through the proxy succeeds (proxy JWT injection)
 package main
 
 import (
@@ -78,8 +76,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Phase 2: drop client 0, then ask a survivor to re-poll and confirm it
-	// still gets updates from the shared backend.
+	// Phase 2: drop client 0, confirm survivors still served
 	if results[0].conn != nil {
 		results[0].conn.Close()
 		fmt.Println("closed client[0]; backend must survive for the others")
@@ -108,6 +105,58 @@ func main() {
 		os.Exit(1)
 	}
 	fmt.Println("PASS: all clients served by one shared backend")
+
+	// Phase 3: HTTP bookshelf test (independent client)
+	fmt.Println("\n--- HTTP bookshelf test ---")
+	hc := runClient(addr, token, serverID)
+	if hc.conn == nil {
+		fmt.Println("  client connect failed:", hc.err)
+		os.Exit(1)
+	}
+	defer hc.conn.Close()
+
+	httpReq := struct {
+		RequestID string            `json:"request_id"`
+		ServerID  string            `json:"server_id"`
+		Method    string            `json:"method"`
+		Path      string            `json:"path"`
+		Headers   map[string]string `json:"headers,omitempty"`
+	}{
+		RequestID: "bookshelf-1",
+		ServerID:  serverID,
+		Method:    "GET",
+		Path:      "/api/studio/files/list?path=%2F",
+	}
+	if err := sendDI(hc.conn, hc.key, 0x10, httpReq); err != nil {
+		fmt.Printf("  HTTP request send failed: %v\n", err)
+		os.Exit(1)
+	}
+	fmt.Println("  HTTP request sent, waiting for response...")
+
+	resp := waitHTTP(hc.conn, hc.key, 20*time.Second)
+	if resp == nil {
+		fmt.Println("  HTTP response timed out")
+		os.Exit(1)
+	}
+	if resp.StatusCode != 200 {
+		body := string(resp.Body)
+		if len(body) > 300 {
+			body = body[:300]
+		}
+		fmt.Printf("  FAIL HTTP %d: %s\n", resp.StatusCode, body)
+		os.Exit(1)
+	}
+	var files struct {
+		Entries []struct {
+			Name string `json:"name"`
+			Path string `json:"path"`
+		} `json:"entries"`
+	}
+	_ = json.Unmarshal(resp.Body, &files)
+	fmt.Printf("  HTTP 200 OK, %d entries (proxy JWT injection working)\n", len(files.Entries))
+	for _, e := range files.Entries[:5] {
+		fmt.Printf("    %s\n", e.Name)
+	}
 }
 
 func runClient(addr, token, serverID string) clientResult {
@@ -125,7 +174,7 @@ func runClient(addr, token, serverID string) clientResult {
 	}
 	r.conn = c
 
-	// Handshake: send our pubkey, read server pubkey, derive shared key.
+	// Handshake
 	if err := c.WriteMessage(websocket.TextMessage,
 		mustEncodeHandshake(&crypto.HandshakeMessage{PublicKey: kp.PublicKeyBase64()})); err != nil {
 		r.err = err
@@ -154,11 +203,13 @@ func runClient(addr, token, serverID string) clientResult {
 	r.key = key
 	r.id = "hive-" + serverHS.PublicKey[:8]
 
+	// DI connect
 	if err := sendDI(c, key, di.TypeDIConnect, di.DIConnectPayload{ServerID: serverID}); err != nil {
 		r.err = err
 		return r
 	}
 
+	// Wait for ConnectAck + SessionUpdate
 	deadline := time.Now().Add(30 * time.Second)
 	for time.Now().Before(deadline) {
 		c.SetReadDeadline(time.Now().Add(2 * time.Second))
@@ -219,6 +270,7 @@ func waitSnapshot(c *websocket.Conn, key []byte, d time.Duration) bool {
 		if err != nil || len(data) < 5+int(length) {
 			continue
 		}
+		_, err = crypto.Decrypt(key, data[5:5+length])
 		if err != nil {
 			continue
 		}
@@ -227,6 +279,40 @@ func waitSnapshot(c *websocket.Conn, key []byte, d time.Duration) bool {
 		}
 	}
 	return false
+}
+
+func waitHTTP(c *websocket.Conn, key []byte, d time.Duration) *struct {
+	StatusCode int               `json:"status_code"`
+	Headers    map[string]string `json:"headers"`
+	Body       json.RawMessage   `json:"body"`
+} {
+	deadline := time.Now().Add(d)
+	for time.Now().Before(deadline) {
+		c.SetReadDeadline(time.Now().Add(2 * time.Second))
+		mt, data, err := c.ReadMessage()
+		if err != nil || mt != websocket.BinaryMessage || len(data) < 5 {
+			continue
+		}
+		mtype, length, err := di.DecodeFrameHeader(data[:5])
+		if err != nil || len(data) < 5+int(length) {
+			continue
+		}
+		plain, err := crypto.Decrypt(key, data[5:5+length])
+		if err != nil {
+			continue
+		}
+		if mtype == 0x11 {
+			var resp struct {
+				StatusCode int               `json:"status_code"`
+				Headers    map[string]string `json:"headers"`
+				Body       json.RawMessage   `json:"body"`
+			}
+			if err := json.Unmarshal(plain, &resp); err == nil {
+				return &resp
+			}
+		}
+	}
+	return nil
 }
 
 func sendDI(c *websocket.Conn, key []byte, mt di.MessageType, payload interface{}) error {

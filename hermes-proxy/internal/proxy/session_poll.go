@@ -113,8 +113,10 @@ func (s *Server) fetchSessionSnapshot(bc *backendConn) (map[string]di.Session, e
 		Sessions []struct {
 			ID         string `json:"id"`
 			Title      string `json:"title"`
-			LastActive int64  `json:"last_active"`
-		} `json:"sessions"`
+			// Some backends emit last_active as a float (unix seconds with sub-second
+			// precision) while others emit an integer; accept both.
+			LastActive float64 `json:"last_active"`
+			} `json:"sessions"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil {
 		return nil, err
@@ -124,7 +126,7 @@ func (s *Server) fetchSessionSnapshot(bc *backendConn) (map[string]di.Session, e
 		out[ss.ID] = di.Session{
 			ID:         ss.ID,
 			Title:      ss.Title,
-			LastActive: ss.LastActive,
+			LastActive: int64(ss.LastActive),
 			ServerID:   bc.id,
 		}
 	}

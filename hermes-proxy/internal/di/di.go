@@ -90,6 +90,8 @@ type DIConnectPayload struct {
 	// Optional per-connection credentials; override ServerConfig creds.
 	Username string `json:"username,omitempty"`
 	Password string `json:"password,omitempty"`
+	// Optional profile override (hermes_studio multi-profile).
+	Profile string `json:"profile,omitempty"`
 	// Optional device code (e.g. AE30BED4) for studio adapter identity.
 	DeviceCode string `json:"device_code,omitempty"`
 	// Optional full MAC (e.g. 4C11AE30BED4) for Socket.IO instanceId.
