@@ -277,6 +277,10 @@ func (s *Server) handleClient(client *Client) {
 }
 
 // handleHTTPRequest decrypts, forwards, encrypts, and sends back the response.
+//
+// For hermes_studio backends, HTTP is tunnelled over the existing mcu
+// WebSocket via the "http.request" → "http.response" event pair — the studio
+// server does not accept direct TCP connections from the proxy in this mode.
 func (s *Server) handleHTTPRequest(client *Client, encryptedPayload []byte) {
 	// Decrypt
 	plaintext, err := crypto.Decrypt(client.SharedKey, encryptedPayload)
@@ -305,16 +309,61 @@ func (s *Server) handleHTTPRequest(client *Client, encryptedPayload []byte) {
 		return
 	}
 
-	// Forward the request
-	resp, err := s.forwardRequest(serverCfg, &req)
+	var resp *protocol.HTTPResponsePayload
+
+	// For hermes_studio, tunnel HTTP through the existing mcu WebSocket.
+	if serverCfg.Type == config.ServerTypeHermesStudio {
+		resp, err = s.relayHTTPOverWebSocket(serverCfg, &req)
+	} else {
+		// generic_ws or unknown types: direct HTTP.
+		resp, err = s.forwardRequest(serverCfg, &req)
+	}
 	if err != nil {
 		log.Printf("[proxy] Forward error to %s: %v", serverCfg.URL, err)
 		s.sendError(client, 502, fmt.Sprintf("upstream error: %v", err))
 		return
 	}
 
+	// Echo back the request ID so the client can correlate the response.
+	resp.RequestID = req.RequestID
+
 	// Send encrypted response
 	s.sendHTTPResponse(client, resp)
+}
+
+// relayHTTPOverWebSocket tunnels an HTTP request through the shared mcu
+// WebSocket using the "http.request" / "http.response" event pair.
+func (s *Server) relayHTTPOverWebSocket(serverCfg *config.ServerConfig, req *protocol.HTTPRequestPayload) (*protocol.HTTPResponsePayload, error) {
+	bc := s.hub.get(serverCfg.ID)
+	if bc == nil {
+		return nil, fmt.Errorf("backend not connected")
+	}
+	bc.mu.Lock()
+	ad := bc.adapter
+	bc.mu.Unlock()
+	if ad == nil {
+		return nil, fmt.Errorf("no adapter")
+	}
+	sa, ok := ad.(*studioAdapter)
+	if !ok {
+		return nil, fmt.Errorf("adapter is not studio")
+	}
+
+	r, err := sa.httpRelay(req.Method, req.Path, req.Body, 30*time.Second)
+	if err != nil {
+		return nil, err
+	}
+	h := make(map[string]string)
+	for k, vs := range r.Header {
+		if len(vs) > 0 {
+			h[k] = vs[0]
+		}
+	}
+	return &protocol.HTTPResponsePayload{
+		StatusCode: r.StatusCode,
+		Headers:    h,
+		Body:       r.Body,
+	}, nil
 }
 
 // forwardRequest forwards the HTTP request to the target Hermes Studio server.

@@ -1,6 +1,7 @@
 package proxy
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -22,6 +23,13 @@ import (
 //
 //	backend Socket.IO event  ->  DI frame to client (TypeDIAuthReq / TypeDIEvent / TypeDISessionUpdate)
 //	client DI event/voice     ->  Socket.IO event to backend
+//
+// It also provides an HTTP-over-WebSocket relay: the proxy sends an
+// "http.request" event with {request_id, method, path, headers, body} and the
+// backend replies with an "http.response" event containing
+// {request_id, status, headers, body}. This lets the proxy tunnel HTTP
+// requests from the reader through the existing mcu WebSocket — no direct
+// TCP connection to the studio needed.
 type studioAdapter struct {
 	proxy    *Server
 	cfg      *config.ServerConfig
@@ -36,8 +44,22 @@ type studioAdapter struct {
 	instanceID string // full MAC for Socket.IO handshake
 	jwt      string
 
+	// httpRelay serialises HTTP-over-WebSocket requests. The reader can only
+	// send one request at a time over the mcu socket; a mutex guarantees we
+	// wait for the matching http.response before sending the next.
+	httpMu     sync.Mutex
+	httpPend   map[string]chan *httpResp // request_id -> response chan
+	httpDead   time.Time                 // deadline for the current request
+
 	done chan struct{}
 	once sync.Once
+}
+
+type httpResp struct {
+	StatusCode int
+	Header     http.Header
+	Body       []byte
+	Err        error
 }
 
 // newStudioAdapter constructs the adapter.
@@ -51,6 +73,7 @@ func newStudioAdapter(p *Server, cfg *config.ServerConfig, user, pass string, co
 		deviceID:   "PROXY-" + shortID(),
 		instanceID: strings.ToUpper("PROXY-" + shortID()),
 		done:       make(chan struct{}),
+		httpPend:   make(map[string]chan *httpResp),
 	}
 }
 
@@ -293,6 +316,38 @@ func (a *studioAdapter) handleSocketIO(pkt string) {
 
 // dispatchEvent maps a backend Socket.IO event to a DI frame.
 func (a *studioAdapter) dispatchEvent(name string, data json.RawMessage) {
+	// HTTP-over-WebSocket relay: an http.response completes the pending request.
+	// Because httpMu serializes all requests, there is at most one pending at a time.
+	if name == "http.response" {
+		var resp struct {
+			Status  int               `json:"status"`
+			Headers map[string]string `json:"headers"`
+			Body    string            `json:"body"`
+		}
+		if err := json.Unmarshal(data, &resp); err != nil {
+			return
+		}
+		a.mu.Lock()
+		// Pick any pending channel (there should be at most one due to httpMu).
+		var ch chan *httpResp
+		for _, c := range a.httpPend {
+			ch = c
+			break
+		}
+		clear(a.httpPend)
+		a.mu.Unlock()
+		if ch == nil {
+			return
+		}
+		h := http.Header{}
+		for k, v := range resp.Headers {
+			h.Set(k, v)
+		}
+		body, _ := base64.StdEncoding.DecodeString(resp.Body)
+		ch <- &httpResp{StatusCode: resp.Status, Header: h, Body: body}
+		return
+	}
+
 	switch name {
 	case "mcu.auth", "auth.invalid", "mcu.reauth.required":
 		// Surface as an authorization request to the user.
@@ -318,6 +373,65 @@ func (a *studioAdapter) dispatchEvent(name string, data json.RawMessage) {
 			Event:     name,
 			Data:      string(data),
 		})
+	}
+}
+
+// httpRelay sends an HTTP request through the mcu WebSocket and waits for
+// the response. The studio backend supports an "http.request" → "http.response"
+// pair on the /global-agent namespace.
+func (a *studioAdapter) httpRelay(method, path string, body []byte, timeout time.Duration) (*httpResp, error) {
+	a.mu.Lock()
+	if a.ws == nil {
+		a.mu.Unlock()
+		return nil, fmt.Errorf("not connected")
+	}
+	a.mu.Unlock()
+
+	reqID := fmt.Sprintf("hr-%d", time.Now().UnixNano())
+	ch := make(chan *httpResp, 1)
+
+	a.mu.Lock()
+	a.httpPend[reqID] = ch
+	a.mu.Unlock()
+
+	defer func() {
+		a.mu.Lock()
+		delete(a.httpPend, reqID)
+		a.mu.Unlock()
+	}()
+
+	// Build payload
+	payload := map[string]interface{}{
+		"request_id": reqID,
+		"method":     method,
+		"path":       path,
+	}
+	if body != nil {
+		payload["body"] = base64.StdEncoding.EncodeToString(body)
+	}
+	data, _ := json.Marshal(payload)
+	pkt := fmt.Sprintf(`42/global-agent,["http.request",%s]`, data)
+
+	a.httpMu.Lock()
+	defer a.httpMu.Unlock()
+
+	a.mu.Lock()
+	ws := a.ws
+	a.mu.Unlock()
+	if ws == nil {
+		return nil, fmt.Errorf("connection lost")
+	}
+	if err := ws.WriteMessage(websocket.TextMessage, []byte(pkt)); err != nil {
+		return nil, fmt.Errorf("write: %w", err)
+	}
+
+	select {
+	case r := <-ch:
+		return r, nil
+	case <-time.After(timeout):
+		return nil, fmt.Errorf("timeout")
+	case <-a.done:
+		return nil, fmt.Errorf("closed")
 	}
 }
 

@@ -60,15 +60,17 @@ func DecodeFrameHeader(header []byte) (MessageType, uint32, error) {
 
 // HTTPRequestPayload is the encrypted payload for HTTP proxy requests.
 type HTTPRequestPayload struct {
-	ServerID string            `json:"server_id"` // Target server identifier
-	Method   string            `json:"method"`     // GET, POST, PUT, DELETE
-	Path     string            `json:"path"`       // /api/...
-	Headers  map[string]string `json:"headers"`
-	Body     []byte            `json:"body"`
+	RequestID string            `json:"request_id"` // Correlates response to request
+	ServerID  string            `json:"server_id"`  // Target server identifier
+	Method    string            `json:"method"`     // GET, POST, PUT, DELETE
+	Path      string            `json:"path"`       // /api/...
+	Headers   map[string]string `json:"headers"`
+	Body      []byte            `json:"body"`
 }
 
 // HTTPResponsePayload is the encrypted payload for HTTP proxy responses.
 type HTTPResponsePayload struct {
+	RequestID  string            `json:"request_id"`  // Echoes back the request ID
 	StatusCode int               `json:"status_code"`
 	Headers    map[string]string `json:"headers"`
 	Body       []byte            `json:"body"`
